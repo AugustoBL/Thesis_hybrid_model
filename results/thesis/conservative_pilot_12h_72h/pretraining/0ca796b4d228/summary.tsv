@@ -1,0 +1,2 @@
+architecture	best_epoch	validation_mse	source_test_mse	trainable_parameters	checkpoint
+flux_correction	497	6.00082020323853e-8	5.656717552336123e-8	2706	Trained_models/flux_correction_pretrained.bson

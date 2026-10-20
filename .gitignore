@@ -1,0 +1,27 @@
+# Local environments, caches and editor state
+.local/
+.venv/
+node_modules/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Temporary files, logs, and fresh reproduction outputs
+/tmp/
+*.tmp
+*.log
+/results/thesis_reproduction/
+/docs/figures/
+**/checkpoint.jld2
+**/run_index.jld2
+**/jobs.jld2
+**/rollout_cache*.jld2

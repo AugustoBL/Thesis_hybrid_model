@@ -1,0 +1,7 @@
+* text=auto
+*.jl text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.jld2 filter=lfs diff=lfs merge=lfs -text
+*.bson filter=lfs diff=lfs merge=lfs -text

@@ -1,0 +1,26 @@
+threshold = 0.99
+criterion = "one standard error; minimum validation loss for a single repeat"
+ranks = [7, 5, 4, 3, 2]
+standard_error = 6.241873290284122e-5
+validation_cutoff = 0.0006155063056750119
+
+[[candidates]]
+validation_losses = [0.0028856232607950005, 0.004111770012130478, 0.003714711838206597]
+parameter_count = 451
+threshold = 0.8
+ranks = [3, 1, 1, 1, 2]
+[[candidates]]
+validation_losses = [0.0019279715964444222, 0.0068991236545059564, 0.000910909369771673]
+parameter_count = 546
+threshold = 0.9
+ranks = [4, 2, 1, 1, 2]
+[[candidates]]
+validation_losses = [0.0005224763608850935, 0.0015418526769224172, 0.0024860863026248126]
+parameter_count = 641
+threshold = 0.95
+ranks = [5, 3, 1, 1, 2]
+[[candidates]]
+validation_losses = [0.0005364313195741488, 0.00045426990349639595, 0.0006685614952459673]
+parameter_count = 1151
+threshold = 0.99
+ranks = [7, 5, 4, 3, 2]

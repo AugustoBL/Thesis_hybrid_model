@@ -1,0 +1,6 @@
+events = 18
+profile_definition = "uniform=1,interior=sinpi(x/L)^2,boundary=cospi(x/L)^2; trapezoid RMS"
+gamma_rms = 0.0001
+seed = 92026
+forecast_hours = 72
+version = 1

@@ -1,0 +1,13 @@
+Date: 2026-10-16T14:00:21.757
+Julia: 1.12.4
+Julia threads: 1
+BLAS threads: 2
+CPU: cascadelake
+Fold: 1
+Repeat: 1
+Warmups: 3
+Samples: 10
+Profile seconds/method: 10.0
+Baseline: C:\Users\britolim\Documents\GitHub\Hybrid_model\results\thesis\thesis_flux_correction_v4
+Batch windows: [(1, 1), (1, 129), (1, 257), (1, 385)]
+Horizons: [16, 32, 64, 128]

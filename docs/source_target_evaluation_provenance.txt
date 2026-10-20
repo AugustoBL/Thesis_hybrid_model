@@ -1,0 +1,5 @@
+Target dataset: C:\Users\ajlim\Documents\Git\Thesis_model\results\thesis_sparse_transfer_v3\shared\data\uniform.jld2
+Pretrained: C:\Users\ajlim\Documents\Git\Thesis_model_hybrid_model\results\conservative_pilot_12h_72h\pretraining\0ca796b4d228\flux_correction\best_model.bson
+Sparse: C:\Users\ajlim\Documents\Git\Thesis_model_hybrid_model\results\thesis_source_temporal_controls
+Dense: C:\Users\ajlim\Documents\Git\Thesis_model_hybrid_model\results\thesis_source_temporal_controls_all_stations
+Forecast: 72 h; no training; native dt=42.398633422677854 seconds
