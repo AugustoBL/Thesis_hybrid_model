@@ -47,7 +47,7 @@ const configuration = (
 
 # Defer loading numerical packages and model/data functions until execution is requested.
 if "--run" in ARGS
-    include(joinpath(@__DIR__, "experiment_io.jl"))
+    include(joinpath(@__DIR__, "training_checkpoint_io.jl"))
 end
 
 function main()
@@ -64,8 +64,8 @@ function main()
         training_event_count=2, validation_event_count=4,
         selection_seed=42000, training_seed=420000)
     # Record the runner, shared implementations and pinned package environment for provenance.
-    source_files = [@__FILE__, joinpath(@__DIR__, "experiment_io.jl"),
-        joinpath(repository, "thesis_experiments", "shared", "conservative_pilot_utils.jl"),
+    source_files = [@__FILE__, joinpath(@__DIR__, "training_checkpoint_io.jl"),
+        joinpath(repository, "thesis_experiments", "shared", "dataset_pretraining_utils.jl"),
         joinpath(repository, "Starting_networks", "Project.toml"),
         joinpath(repository, "Starting_networks", "Manifest.toml")]
     # Include every Julia implementation file under src in a stable order.

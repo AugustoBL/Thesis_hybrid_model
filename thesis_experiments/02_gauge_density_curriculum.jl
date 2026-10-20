@@ -36,9 +36,9 @@ const training_settings = (
 # Keep a plan-only launch free of dataset loading and training-package imports.
 if "--run" in ARGS
     # Make the shared Surge and diagnostic modules available to the original runtime.
-    include(joinpath(@__DIR__, "experiment_io.jl"))
+    include(joinpath(@__DIR__, "training_checkpoint_io.jl"))
     # Reuse the original timed fitter and interval evaluation/aggregation.
-    include(joinpath(repository, "thesis_experiments", "shared", "reviewer_followup_runtime.jl"))
+    include(joinpath(repository, "thesis_experiments", "shared", "followup_training_evaluation.jl"))
     # Calls below explicitly name the original fitting, evaluation and aggregation implementation.
     import .ReviewerFollowupRuntime
 end
@@ -104,9 +104,9 @@ function main()
 
     # Retain the original manifest container, with provenance for this subset.
     # List this runner, its reused implementations and the package environment for fingerprinting.
-    source_files = [@__FILE__, joinpath(@__DIR__, "experiment_io.jl"),
-        joinpath(repository, "thesis_experiments", "shared", "reviewer_followup_runtime.jl"),
-        joinpath(repository, "thesis_experiments", "shared", "conservative_pilot_utils.jl"),
+    source_files = [@__FILE__, joinpath(@__DIR__, "training_checkpoint_io.jl"),
+        joinpath(repository, "thesis_experiments", "shared", "followup_training_evaluation.jl"),
+        joinpath(repository, "thesis_experiments", "shared", "dataset_pretraining_utils.jl"),
         joinpath(repository, "Starting_networks", "Project.toml"),
         joinpath(repository, "Starting_networks", "Manifest.toml")]
     # Add all Julia files in src in a fixed order.
@@ -287,7 +287,7 @@ if "--run" in ARGS
     main()
 else
     println("Two reported follow-ups: two gauges and 10/10/10/170 curriculum.")
-    println("30 fits; run 01_main_experiments.jl first, or edit baseline_directory.")
+    println("30 fits; run 01_sparse_adaptation_experiments.jl first, or edit baseline_directory.")
     println("Output: $output_directory")
     println("Add --run to execute.")
 end

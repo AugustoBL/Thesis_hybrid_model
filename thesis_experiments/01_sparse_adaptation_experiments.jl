@@ -69,7 +69,7 @@ const training_settings = (
 # A plan-only invocation does not load models, datasets or the training packages.
 if "--run" in ARGS
     # Load shared training/diagnostic functions and the original timed result writer.
-    include(joinpath(@__DIR__, "experiment_io.jl"))
+    include(joinpath(@__DIR__, "training_checkpoint_io.jl"))
     # Reuse the original nested LoRA rank-selection procedure rather than implementing it here.
     include(joinpath(repository, "lora_rank_optimisation", "rank_selection.jl"))
 end
@@ -183,8 +183,8 @@ function main()
 
     # Fingerprint this reproduction's code and inputs, keeping historical
     # manifests and results untouched. The manifest retains its original keys.
-    source_files = [@__FILE__, joinpath(@__DIR__, "experiment_io.jl"),
-        joinpath(repository, "thesis_experiments", "shared", "conservative_pilot_utils.jl"),
+    source_files = [@__FILE__, joinpath(@__DIR__, "training_checkpoint_io.jl"),
+        joinpath(repository, "thesis_experiments", "shared", "dataset_pretraining_utils.jl"),
         joinpath(repository, "lora_rank_optimisation", "rank_selection.jl"),
         joinpath(repository, "Starting_networks", "Project.toml"),
         joinpath(repository, "Starting_networks", "Manifest.toml")]

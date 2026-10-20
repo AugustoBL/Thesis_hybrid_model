@@ -76,8 +76,8 @@ function pretrain(model, training, validation, directory; settings)
     mkpath(directory)
     final_path = joinpath(directory, "complete.jld2")
     # The shared selected checkpoint was promoted out of the pilot result folder.
-    shared_pilot = normpath(joinpath(@__DIR__, "..", "..", "results", "thesis",
-        "conservative_pilot_12h_72h", "pretraining", "0ca796b4d228", "flux_correction"))
+    shared_pilot = normpath(joinpath(@__DIR__, "..", "..", "results", "reported",
+        "source_pretraining", "pretraining", "0ca796b4d228", "flux_correction"))
     best_path = normpath(directory) == shared_pilot ?
         normpath(joinpath(@__DIR__, "..", "..", "Trained_models", "flux_correction_pretrained.bson")) :
         joinpath(directory, "best_model.bson")

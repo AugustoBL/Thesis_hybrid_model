@@ -8,7 +8,7 @@ import .Surge
 # summary statistics, file fingerprints, rank files and creation timestamps.
 using Flux, JLD2, Random, Statistics, SHA, TOML, Dates
 # Reuse the original dataset loader and source-pretraining routines.
-include(joinpath(@__DIR__, "..", "thesis_experiments", "shared", "conservative_pilot_utils.jl"))
+include(joinpath(@__DIR__, "..", "thesis_experiments", "shared", "dataset_pretraining_utils.jl"))
 # Reuse the original free-forecast and spatial/temporal error calculations.
 include(joinpath(@__DIR__, "..", "src", "experiment_diagnostics.jl"))
 

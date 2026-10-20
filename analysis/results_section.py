@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 from chapter_6 import (REPO, LABELS, STYLES, read_tsv, save, summary_value,
                        local_run, average, curriculum_figure)
 
-ROOT = REPO / 'results/thesis/thesis_flux_correction_v4'
+ROOT = REPO / 'results/reported/sparse_adaptation'
 OUT = REPO / 'docs/figures'
 OUT.mkdir(parents=True, exist_ok=True)
 summary = read_tsv(ROOT / 'summary.tsv')

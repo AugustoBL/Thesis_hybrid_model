@@ -26,7 +26,7 @@ using Profile, LinearAlgebra
 
 # Only load numerical/training packages when profiling is actually requested.
 if "--run" in ARGS
-    include(joinpath(@__DIR__, "experiment_io.jl"))
+    include(joinpath(@__DIR__, "training_checkpoint_io.jl"))
 end
 
 function main()

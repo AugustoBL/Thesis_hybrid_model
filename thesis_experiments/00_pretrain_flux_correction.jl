@@ -30,7 +30,7 @@ const pretraining_settings = (
 
 # Load the numerical functions only when execution is explicitly requested.
 if "--run" in ARGS
-    include(joinpath(@__DIR__, "experiment_io.jl"))
+    include(joinpath(@__DIR__, "training_checkpoint_io.jl"))
 end
 
 # Run data preparation, source training and held-out evaluation in that order.
@@ -50,7 +50,7 @@ function main()
     source_checksum = bytes2hex(sha256(read(source_file)))
     # Record the implementations that define the architecture and training procedure.
     code_paths = ["src/models.jl", "src/training_utils.jl",
-        "thesis_experiments/shared/conservative_pilot_utils.jl"]
+        "thesis_experiments/shared/dataset_pretraining_utils.jl"]
     # Store one digest per implementation file, in the same order as code_paths.
     code_checksums = [bytes2hex(sha256(read(joinpath(repository, path)))) for path in code_paths]
     # Bundle event memberships, hyperparameters and physical grid scales for later inspection.

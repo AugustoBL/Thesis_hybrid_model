@@ -1,20 +1,19 @@
 # Thesis experiment guide
 
-For environment setup, input files, shared helper locations and execution
-commands, see the [project README](../README.md). This folder contains the reported
+Run commands from the repository root using the Starting_networks Julia environment. Required inputs are in Data/ and Trained_models/. This folder contains the reported
 experiments; the commented scripts expose all scientific settings directly.
 
 ## Runner map
 
 | Script | Thesis experiment | Output subfolder |
 |---|---|---|
-| [00_source_pretraining.jl](00_source_pretraining.jl) | Optional flux-correction source pretraining, Appendix A.1 | `source_pretraining/` |
-| [01_main_experiments.jl](01_main_experiments.jl) | Experiments 1-4: adaptation parameterisation, temporal training, gauge geometry/drag profile, observation noise | `main/` |
-| [02_gauge_and_curriculum_followups.jl](02_gauge_and_curriculum_followups.jl) | Two-gauge comparison and shortened curriculum | `followups/` |
-| [03_no_domain_shift_control.jl](03_no_domain_shift_control.jl) | Sparse source-domain long-128 fine-tuning, tested on source and target events | `source_control/` |
-| [04_profile_adaptation.jl](04_profile_adaptation.jl) | CPU profiling of six saved adaptation models | `adaptation_profile/` |
+| [00_pretrain_flux_correction.jl](00_pretrain_flux_correction.jl) | Optional flux-correction source pretraining, Appendix A.1 | `source_pretraining/` |
+| [01_sparse_adaptation_experiments.jl](01_sparse_adaptation_experiments.jl) | Experiments 1-4: adaptation parameterisation, temporal training, gauge geometry/drag profile, observation noise | `main/` |
+| [02_gauge_density_curriculum.jl](02_gauge_density_curriculum.jl) | Two-gauge comparison and shortened curriculum | `followups/` |
+| [03_source_domain_control.jl](03_source_domain_control.jl) | Sparse source-domain long-128 fine-tuning, tested on source and target events | `source_control/` |
+| [04_profile_adaptation_cost.jl](04_profile_adaptation_cost.jl) | CPU profiling of six saved adaptation models | `adaptation_profile/` |
 
-[experiment_io.jl](experiment_io.jl) loads the shared implementation and preserves
+[training_checkpoint_io.jl](training_checkpoint_io.jl) loads the shared implementation and preserves
 the original timed checkpoint/result format; it is not a standalone runner.
 
 Runner 01 keeps the four main experiments together because each fold's
@@ -39,7 +38,7 @@ Runner 02 retains each fold's main temporal choice for the two-gauge comparison.
 The shortened curriculum instead uses 10/10/10/170 epochs at lead sets
 `[16]`, `[16,32]`, `[16,32,64]` and `[16,32,64,128]`.
 To use existing completed main fits for runners 02/04, set `baseline_directory`
-to `results/thesis/thesis_flux_correction_v4` in those scripts.
+to `results/reported/sparse_adaptation` in those scripts.
 
 ## Saved results
 

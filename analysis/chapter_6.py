@@ -228,7 +228,7 @@ def noise_figure(output, summary, events):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--results-root", type=Path, default=REPO / "results/thesis/thesis_flux_correction_v4")
+    parser.add_argument("--results-root", type=Path, default=REPO / "results/reported/sparse_adaptation")
     parser.add_argument("--output-dir", type=Path, default=REPO / "docs/figures")
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
