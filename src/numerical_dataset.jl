@@ -3,7 +3,7 @@ module NumericalDataset
 using OrdinaryDiffEq, ComponentArrays, JLD2, Random, Statistics
 include(joinpath(@__DIR__, "..", "Starting_models", "model_1d_surge_wave.jl"))
 
-# Geometry and forcing helpers feed the hidden-drag shallow-water ODE imported above.
+
 """
 Construct the staggered grid, depth profile, and output times.
 
@@ -18,12 +18,10 @@ function dataset_geometry(settings)
     grid_spacing = settings.domain_length / settings.grid_cells
     velocity_grid = collect(0.0:grid_spacing:settings.domain_length)
     water_level_grid = collect(grid_spacing/2:grid_spacing:settings.domain_length-grid_spacing/2)
-    # Convert dimensionless profile locations and widths to physical distances
-    # before evaluating the two-transition bathymetry.
+
     depth = depth_profile(velocity_grid, settings.minimum_depth, settings.maximum_depth,
         settings.depth_edges .* settings.domain_length, settings.depth_widths .* settings.domain_length)
-    # Use the largest linear gravity-wave speed to set the output cadence;
-    # ODE integration remains controlled by the chosen solver and tolerances.
+
     output_interval = settings.output_cfl * grid_spacing / sqrt(maximum(depth) * settings.gravity)
     times = collect(settings.start_time:output_interval:settings.end_time)
     return (grid_spacing=grid_spacing, velocity_grid=velocity_grid, water_level_grid=water_level_grid,
@@ -43,8 +41,7 @@ Returns:
     Scalar RMS with the units of values.
 """
 function spatial_rms(values, grid_spacing, domain_length)
-    # Half-weight endpoint faces implement the trapezoidal spatial integral,
-    # then divide by domain length before taking the square root.
+
     return sqrt(grid_spacing / domain_length *
         (sum(abs2, values) - 0.5 * first(values)^2 - 0.5 * last(values)^2))
 end
@@ -66,15 +63,12 @@ function drag_coefficients(geometry, settings)
     elseif settings.drag_profile == :uniform
         profile = ones(length(coordinate))
     elseif settings.drag_profile == :interior
-        # Concentrate hidden drag inside the domain while tapering it to zero at walls.
         profile = sinpi.(coordinate).^2
     else
         @assert settings.drag_profile == :boundary
-        # Concentrate drag near the walls with a minimum at the domain centre.
         profile = cospi.(coordinate).^2
     end
-    # Equal RMS amplitudes compare spatial placement without also changing
-    # the domain-integrated squared coefficient magnitude.
+
     return settings.drag_amplitude .* profile ./
         spatial_rms(profile, geometry.grid_spacing, settings.domain_length)
 end
@@ -133,10 +127,9 @@ function event_wind(random_generator, settings)
     second_amplitude = storm_amplitude * sample_uniform(random_generator, settings.second_amplitude_fraction)
     second_center = storm_center + sample_uniform(random_generator, settings.second_delay_hours) * 3600
     second_width = sample_uniform(random_generator, settings.second_width_hours) * 3600
-    # All random event parameters have now been drawn; repeated evaluations
-    # at a given time return the same forcing throughout the numerical solve.
+
     return function(time)
-        # Allow the rising and decaying halves of the main storm to have different durations.
+
         width = time <= storm_center ? rise_width : decay_width
         primary_envelope = exp(-0.5 * ((time - storm_center) / width)^2)
         secondary_envelope = exp(-0.5 * ((time - second_center) / second_width)^2)
@@ -184,8 +177,7 @@ function generate_dataset(output_file; settings, wind_settings, solver, absolute
     events = []
     for event_index in 1:settings.event_count
         wind = event_wind(random_generator, wind_settings)
-        # The callback interface supplies a face index, not a physical coordinate.
-        # This linear-drag variant ignores time and depth, and returns acceleration.
+
         """
         Compute the hidden linear-drag term at one velocity face.
 
@@ -199,7 +191,6 @@ function generate_dataset(output_file; settings, wind_settings, solver, absolute
             Linear-drag term [m/s^2].
         """
         hidden_drag(position, time, velocity, depth) = drag[position] * velocity
-        # Both boundaries are closed; no external volume enters through discharge.
         """
         Supply zero boundary discharge.
 
@@ -214,21 +205,17 @@ function generate_dataset(output_file; settings, wind_settings, solver, absolute
             settings.domain_width, geometry.grid_spacing, settings.grid_cells, settings.water_density,
             geometry.chezy, wind, zero_discharge, zero_discharge, hidden_drag)
         problem = ODEProblem(model, initial_state(geometry, settings), (settings.start_time, settings.end_time))
-        # Request samples on the shared comparison time grid; events may have
-        # different adaptive internal solver steps.
+
         solution = solve(problem, solver; saveat=geometry.times,
             abstol=absolute_tolerance, reltol=relative_tolerance)
         @assert string(solution.retcode) in ("Success", "ReturnCode.Success") "Numerical simulation failed"
         push!(events, pack_event(solution, wind, geometry.times))
     end
-    # Save the nominal physical inputs separately from the hidden drag.
-    # The surrogate sees depth and wind, not these extra drag coefficients.
+
     parameters = (g=settings.gravity, C=settings.chezy_coefficient, C_profile=geometry.chezy,
         rho=settings.water_density, W=settings.domain_width, D=geometry.depth,
         L=settings.domain_length, dx=geometry.grid_spacing, nx=settings.grid_cells, linear_drag=0.0)
     mkpath(dirname(output_file))
-    # Persist both simulation outputs and generation provenance so downstream
-    # training and evaluation can reconstruct the domain and forcing convention.
     JLD2.jldsave(output_file; solution=events, times=geometry.times, params=parameters,
         grid=ComponentVector(h=geometry.water_level_grid, u=geometry.velocity_grid),
         settings=settings, wind_settings=wind_settings, drag_coefficients=drag,

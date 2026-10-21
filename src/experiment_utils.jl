@@ -8,18 +8,25 @@ Args:
 Returns:
     Output filepath.
 """
-function save_table(path, rows)
+function save_table(path, rows; delimiter='\t')
     mkpath(dirname(path))
     open(path, "w") do output
-        # Use a consistent named-tuple field order so summaries remain readable
-        # without needing a separate schema file.
         columns = propertynames(first(rows))
-        println(output, join(string.(columns), '\t'))
+        println(output, join(string.(columns), delimiter))
         for row in rows
-            println(output, join((getproperty(row, column) for column in columns), '\t'))
+            println(output, join((getproperty(row, column) for column in columns), delimiter))
         end
     end
     return path
+end
+
+"""Read a numeric/symbol TSV written by save_table."""
+function load_table(path)
+    lines = readlines(path)
+    columns = Tuple(Symbol.(split(first(lines), '\t')))
+    parse_field = value -> value == "true" ? true : value == "false" ? false :
+        something(tryparse(Int, value), tryparse(Float64, value), Symbol(value))
+    return [NamedTuple{columns}(Tuple(parse_field.(split(line, '\t')))) for line in lines[2:end]]
 end
 
 """
@@ -34,24 +41,16 @@ Returns:
     Training and validation datasets with noise-free initial states and configured observation noise.
 """
 function prepare_training_split(dataset, split, configuration)
-    # Check both supervised splits before building arrays; test events are
-    # reserved for later evaluation and are not prepared here.
-    event_indices = vcat(split.train, split.validation)
-    @assert all(length(dataset.solution[index]) > configuration.training_steps for index in event_indices)
+    @assert all(length(dataset.solution[index]) > configuration.training_steps
+        for index in vcat(split.train, split.validation))
     training = prepare_sparse_station_event_data(dataset.solution[split.train], dataset.params;
         measurement_gap=configuration.measurement_gap,
-        # Explicitly supervise only h; the empty second collection leaves every
-        # velocity target unobserved, although velocity is still evolved.
         observed_grid_indices_by_channel=(configuration.stations, Int[]),
         max_steps=configuration.training_steps)
     validation = prepare_sparse_station_event_data(dataset.solution[split.validation], dataset.params;
         measurement_gap=configuration.measurement_gap,
-        # Explicitly supervise only h; the empty second collection leaves every
-        # velocity target unobserved, although velocity is still evolved.
         observed_grid_indices_by_channel=(configuration.stations, Int[]),
         max_steps=configuration.training_steps)
-    # Independent deterministic seed offsets prevent reusing the same noise
-    # realization for training and validation.
     training = add_observation_noise(training, (configuration.observation_noise_std, 0.0);
         rng=MersenneTwister(split.seed + configuration.training_noise_seed_offset))
     validation = add_observation_noise(validation, (configuration.observation_noise_std, 0.0);
@@ -72,67 +71,53 @@ Args:
 Returns:
     Run result containing configuration, split, history, validation selection, counts, and loss scales.
 """
-function fit_run(pretrained_model, dataset, split, configuration, directory)
-    completion_path = joinpath(directory, "result.jld2")
-    # A result record is the completion marker; this shortcut trusts the
-    # existing run directory rather than rechecking all saved model artifacts.
-    if isfile(completion_path)
-        return JLD2.load(completion_path, "result")
+function fit_run(pretrained_model, dataset, split, configuration, directory; save_final=false)
+    result_path = joinpath(directory, "result.jld2")
+    checkpoint_path = joinpath(directory, "checkpoint.jld2")
+    if isfile(result_path)
+        result = JLD2.load(result_path, "result")
+        isequal(result.configuration, configuration) && isequal(result.split, split) ||
+            error("Saved run settings differ: $directory")
+        return result
     end
     mkpath(directory)
-    training_data, validation_data = prepare_training_split(dataset, split, configuration)
-    ranks = nothing
-    if configuration.adaptation.method == :lora
-        # Use ranks selected for this fold, keeping held-out fold selection separate.
-        ranks = configuration.adaptation.ranks[split.fold]
+    previous = isfile(checkpoint_path) ? JLD2.load(checkpoint_path, "saved") : nothing
+    if previous !== nothing
+        isequal(previous.configuration, configuration) && isequal(previous.split, split) ||
+            error("Checkpoint settings differ: $directory")
     end
-    model = configure_adaptation(pretrained_model, configuration.adaptation.method;
-        seed=split.seed, ranks=ranks)
-    # Set fixed objective scales from pretrained training-window errors,
-    # not from validation or test outcomes.
+    preparation_start = time_ns()
+    training_data, validation_data = prepare_training_split(dataset, split, configuration)
     normalizers = compute_pretrained_error_scales(pretrained_model, training_data,
         configuration.training, configuration.stations)
-    optimizer = Adam(configuration.optimizer.learning_rate,
-        configuration.optimizer.betas, configuration.optimizer.epsilon)
-    checkpoint_path = joinpath(directory, "checkpoint.jld2")
-    resume = nothing
-    if isfile(checkpoint_path)
-        # Restore optimizer moments and RNG as well as parameters via train_model!.
-        resume = JLD2.load(checkpoint_path, "state")
-    end
-    # The trainer invokes this at validation epochs, coupling resumable state
-    # and the human-readable learning curve to the same training point.
-    """
-    Save resumable training state and its history table.
-
-    Args:
-        state: Model, optimizer, random generator, history, and validation selection.
-
-    Returns:
-        Path to the saved training-history table.
-    """
+    ranks = configuration.adaptation.method == :lora ? configuration.adaptation.ranks[split.fold] : nothing
+    model = configure_adaptation(pretrained_model, configuration.adaptation.method; seed=split.seed, ranks=ranks)
+    preparation_seconds = (time_ns() - preparation_start) / 1e9 +
+        (previous === nothing ? 0.0 : previous.preparation_seconds)
     save_checkpoint = function(state)
-        JLD2.jldsave(checkpoint_path; state=state)
+        saved = (; state, configuration, split, preparation_seconds)
+        JLD2.jldsave(checkpoint_path * ".tmp"; saved)
+        mv(checkpoint_path * ".tmp", checkpoint_path; force=true)
         save_table(joinpath(directory, "training_history.tsv"), state.history)
+        println("  epoch $(state.epoch)/$(configuration.training.epochs), validation=$(state.best_loss)")
+        flush(stdout)
     end
     state = train_model!(model, training_data, validation_data;
-        settings=configuration.training, stations=configuration.stations,
-        normalizers=normalizers, optimizer=optimizer,
+        settings=configuration.training, stations=configuration.stations, normalizers=normalizers,
+        optimizer=Adam(configuration.optimizer.learning_rate,
+            configuration.optimizer.betas, configuration.optimizer.epsilon),
         rng=MersenneTwister(split.seed + configuration.optimizer_seed_offset),
-        resume=resume, checkpoint=save_checkpoint)
-    # Preserve the actual final iterate before loading the validation-best snapshot.
-    save_model(joinpath(directory, "final_model.bson"), state.model)
-    # Only trainable arrays changed during fitting; frozen base arrays already
-    # match the selected model and need no separate restoration.
+        resume=previous === nothing ? nothing : previous.state, checkpoint=save_checkpoint)
+    save_final && save_model(joinpath(directory, "final_model.bson"), state.model)
     restore_trainable_parameters!(state.model, state.best_parameters)
     save_model(joinpath(directory, "best_model.bson"), state.model)
     result = (configuration=configuration, split=split, history=state.history,
         best_validation_loss=state.best_loss, best_epoch=state.best_epoch,
         completed_epochs=state.epoch, updates=state.updates,
-        trainable_parameters=trainable_parameter_count(state.model), normalizers=normalizers)
-    # Write completion metadata after both model exports so subsequent calls
-    # can distinguish a finished fit from an in-progress checkpoint.
-    JLD2.jldsave(completion_path; result=result)
+        trainable_parameters=trainable_parameter_count(state.model), normalizers=normalizers,
+        training_seconds=state.training_seconds, preparation_seconds=preparation_seconds)
+    JLD2.jldsave(result_path * ".tmp"; result)
+    mv(result_path * ".tmp", result_path; force=true)
     return result
 end
 
@@ -148,18 +133,13 @@ Args:
 Returns:
     Vector of directory/result records; completed runs are reused.
 """
-function run_experiment(pretrained_model, dataset, splits; configuration)
-    dataset_checksum = sha256(read(configuration.dataset_file))
-    model_checksum = sha256(read(configuration.pretrained_file))
+function run_experiment(pretrained_model, dataset, splits; configuration, save_final=false)
     runs = NamedTuple[]
     for split in splits
-        # Include event membership and input contents in the identifier so runs
-        # with different data/model bytes do not silently share a result directory.
-        configuration_id = bytes2hex(sha256(repr((configuration, split, dataset_checksum, model_checksum))))[1:12]
         directory = joinpath(configuration.output_directory, configuration.name,
             "experiment_$(configuration.experiment)", string(configuration.adaptation.method),
-            configuration_id, "fold_$(split.fold)", "repeat_$(split.repeat)")
-        result = fit_run(pretrained_model, dataset, split, configuration, directory)
+            "fold_$(split.fold)", "repeat_$(split.repeat)")
+        result = fit_run(pretrained_model, dataset, split, configuration, directory; save_final)
         push!(runs, (directory=directory, result=result))
     end
     return runs

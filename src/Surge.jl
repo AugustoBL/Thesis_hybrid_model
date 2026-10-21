@@ -1,6 +1,6 @@
 module Surge
 
-using BSON, ComponentArrays, Flux, JLD2, Random, Statistics, SHA
+using BSON, ComponentArrays, Flux, JLD2, Random, Statistics
 
 
 include("models.jl")

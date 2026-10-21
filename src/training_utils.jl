@@ -434,6 +434,7 @@ function optimizer_step!(model, optimizer_state, batch, stations;
         rollout_objective(current_model, batch.state, batch.forcing, batch.targets,
             stations, batch.horizons, batch.normalizers; detached_prefix_steps=batch.detached_prefix_steps) + penalty(current_model)
     end
+    isfinite(loss) || error("Nonfinite training loss")
     record_training_time!(timings, :forward_backward, start_time_ns)
     start_time_ns = time_ns()
     # Measure gradients for the history without changing the values passed to Adam.
@@ -554,6 +555,8 @@ Returns:
 function train_model!(model, training_data, validation_data; settings, stations, normalizers,
                       optimizer, rng, checkpoint=state -> nothing, resume=nothing,
                       penalty=model -> 0f0, timings=nothing, validation_stations=stations)
+    training_start = time_ns()
+    prior_seconds = resume === nothing ? 0.0 : resume.training_seconds
     if !settings.normalize_loss
         normalizers = ones(length(settings.rollout_horizons))
     end
@@ -563,6 +566,7 @@ function train_model!(model, training_data, validation_data; settings, stations,
         start_time_ns = time_ns()
         best_validation_loss = validation_loss(model, validation_data, validation_stations)
         record_training_time!(timings, :validation, start_time_ns)
+        isfinite(best_validation_loss) || error("Nonfinite initial validation loss")
         best_parameters = copy_trainable_parameters(model)
         best_validation_epoch = 0
         updates = 0
@@ -578,13 +582,7 @@ function train_model!(model, training_data, validation_data; settings, stations,
         best_validation_loss = resume.best_loss
         best_validation_epoch = resume.best_epoch
         updates = resume.updates
-        # Retain the current history columns when loading older checkpoint records.
-        history = NamedTuple[]
-        for row in resume.history
-            push!(history, (epoch=row.epoch, updates=row.updates, training_loss=row.training_loss,
-                validation_loss=row.validation_loss, gradient_norm=row.gradient_norm,
-                update_norm=row.update_norm, horizon=row.horizon))
-        end
+        history = copy(resume.history)
         first_epoch = resume.epoch + 1
     end
     for epoch in first_epoch:settings.epochs
@@ -619,6 +617,7 @@ function train_model!(model, training_data, validation_data; settings, stations,
             start_time_ns = time_ns()
             current_validation_loss = validation_loss(model, validation_data, validation_stations)
             record_training_time!(timings, :validation, start_time_ns)
+            isfinite(current_validation_loss) || error("Nonfinite validation loss")
         end
         best_parameters, best_validation_loss, best_validation_epoch = update_best_checkpoint(model,
             current_validation_loss, epoch, best_parameters, best_validation_loss, best_validation_epoch)
@@ -631,11 +630,77 @@ function train_model!(model, training_data, validation_data; settings, stations,
             start_time_ns = time_ns()
             checkpoint((model=model, optimizer_state=optimizer_state, rng=rng, history=history,
                 best_parameters=best_parameters, best_loss=best_validation_loss, best_epoch=best_validation_epoch,
-                updates=updates, epoch=epoch))
+                updates=updates, epoch=epoch,
+                training_seconds=prior_seconds + (time_ns() - training_start) / 1e9))
             record_training_time!(timings, :checkpoint, start_time_ns)
         end
     end
     return (model=model, optimizer_state=optimizer_state, rng=rng, history=history,
         best_parameters=best_parameters, best_loss=best_validation_loss, best_epoch=best_validation_epoch,
-        updates=updates, epoch=last(history).epoch)
+        updates=updates, epoch=last(history).epoch,
+        training_seconds=prior_seconds + (time_ns() - training_start) / 1e9)
+end
+
+function one_step_loss(model, data, batch_size)
+    total = 0.0
+    for indices in Iterators.partition(axes(data.input, 3), batch_size)
+        total += length(indices) * endpoint_loss(model(data.input[:, :, indices]), data.target[:, :, indices], 1)
+    end
+    return total / size(data.input, 3)
+end
+
+function perturb_state_input(input, level, rng)
+    level == 0 && return input
+    perturbed = copy(input)
+    noise_h = level .* randn(rng, Float32, size(input, 1)-1, 1, size(input, 3))
+    noise_h .-= mean(noise_h; dims=1) # Do not change the volume the target must conserve.
+    perturbed[1:end-1, 1:1, :] .+= noise_h
+    perturbed[2:end-1, 2:2, :] .+= level .* randn(rng, Float32, size(input, 1)-2, 1, size(input, 3))
+    return perturbed
+end
+
+"""Train supervised one-step pairs with the source learning-rate schedule and state noise."""
+function train_model!(model, training::NamedTuple, validation::NamedTuple; settings,
+                      checkpoint=state -> nothing, resume=nothing)
+    if resume === nothing
+        optimizer_state = Flux.setup(Adam(settings.learning_rate), model)
+        rng = MersenneTwister(settings.seed)
+        best_loss = one_step_loss(model, validation, settings.batch_size)
+        isfinite(best_loss) || error("Nonfinite initial validation loss")
+        best_parameters, best_epoch = copy_trainable_parameters(model), 0
+        history = NamedTuple[(epoch=0, learning_rate=settings.learning_rate,
+            training_loss=NaN, validation_loss=best_loss)]
+        first_epoch = 1
+    else
+        model, optimizer_state, rng = resume.model, resume.optimizer_state, resume.rng
+        history = copy(resume.history)
+        best_parameters, best_loss, best_epoch = resume.best_parameters, resume.best_loss, resume.best_epoch
+        first_epoch = resume.epoch + 1
+    end
+    for epoch in first_epoch:settings.epochs
+        stage = min(fld(epoch - 1, settings.learning_rate_steps), settings.learning_rate_decay_stages)
+        rate = settings.learning_rate * settings.learning_rate_decay^(stage / settings.learning_rate_decay_stages)
+        Flux.adjust!(optimizer_state, rate)
+        total = 0.0
+        for indices in Iterators.partition(randperm(rng, size(training.input, 3)), settings.batch_size)
+            input = perturb_state_input(training.input[:, :, indices], settings.noise_std, rng)
+            target = training.target[:, :, indices]
+            loss, gradient = Flux.withgradient(model) do current
+                endpoint_loss(current(input), target, 1)
+            end
+            isfinite(loss) || error("Nonfinite pretraining loss")
+            Flux.update!(optimizer_state, model, gradient[1])
+            total += length(indices) * loss
+        end
+        loss = one_step_loss(model, validation, settings.batch_size)
+        isfinite(loss) || error("Nonfinite validation loss")
+        best_parameters, best_loss, best_epoch = update_best_checkpoint(model, loss, epoch,
+            best_parameters, best_loss, best_epoch)
+        push!(history, (epoch=epoch, learning_rate=rate,
+            training_loss=total / size(training.input, 3), validation_loss=loss))
+        if epoch % settings.checkpoint_interval == 0 || epoch == settings.epochs
+            checkpoint((; model, optimizer_state, rng, history, best_parameters, best_loss, best_epoch, epoch))
+        end
+    end
+    return (; model, optimizer_state, rng, history, best_parameters, best_loss, best_epoch, epoch=last(history).epoch)
 end

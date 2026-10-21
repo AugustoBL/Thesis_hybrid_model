@@ -29,12 +29,12 @@ Args:
 Returns:
     Named tuple containing solution, grid, prediction times in seconds, and params.
 """
-function load_burgers_ensemble(filename::String; data_path=get_data_path())
+function load_burgers_ensemble(filename::String; data_path=get_data_path(), relative_times=false)
     data = load(joinpath(data_path, filename))
     return (
         solution=data["solution"],
         grid=data["grid"],
-        times=data["times"][2:end],
+        times=relative_times ? Float64.(data["times"][2:end]) .- Float64(first(data["times"])) : data["times"][2:end],
         params=data["params"],
     )
 end
@@ -55,7 +55,7 @@ function _model_input(state, params)
     input = zeros(Float32, n_velocity_points, 5)
     input[1:n_water_level_points, 1] .= state.h
     input[:, 2] .= state.u
-    # Depth normalization 
+    # Depth normalization
     input[:, 3] .= params.D ./ 30f0
     input[:, 4] .= state.tau
     input[1, 5] = 1f0
@@ -296,4 +296,22 @@ function make_event_splits(event_count; fold_count, folds, repeats, training_eve
         end
     end
     return splits
+end
+
+"""Encode consecutive event states as supervised one-step input/target arrays."""
+function one_step_pairs(dataset, indices)
+    count = sum(length(dataset.solution[i]) - 1 for i in indices)
+    faces = length(dataset.grid.u)
+    inputs = Array{Float32}(undef, faces, 5, count)
+    targets = Array{Float32}(undef, faces, 2, count)
+    sample = 0
+    for event_index in indices
+        event = dataset.solution[event_index]
+        for step in 1:length(event)-1
+            sample += 1
+            inputs[:, :, sample] .= _model_input(event[step], dataset.params)
+            targets[:, :, sample] .= _model_target(event[step+1])
+        end
+    end
+    return (input=inputs, target=targets)
 end
