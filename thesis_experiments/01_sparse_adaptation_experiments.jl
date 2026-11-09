@@ -37,9 +37,11 @@ const training_settings = (
 )
 
 include(joinpath(@__DIR__, "experiment_dependencies.jl"))
-include(joinpath(repository, "lora_rank_optimisation", "rank_selection.jl"))
+include(joinpath(@__DIR__, "src", "sparse_campaign.jl"))
+include(joinpath(repository, "src", "rank_selection.jl"))
 
 function objective_settings(objective)
+    # Balanced and curriculum use several leads. Other objectives use one endpoint.
     if objective == :balanced
         return training_settings
     elseif objective == :curriculum
@@ -54,6 +56,7 @@ function objective_settings(objective)
     elseif objective == :fixed64
         endpoint = 64
     end
+    # Keep the forecast horizon but backpropagate through fewer steps.
     detach_gradients = objective == :detached || objective == :one_step
     gradient_steps = 16
     if objective == :one_step
@@ -82,37 +85,21 @@ function configuration(method, objective, profile, layout, noise_std, ranks)
     )
 end
 
-function run_condition!(jobs, pretrained_model, datasets, ranks,
-        stage, method, objective, profile, layout, noise_std, split)
-    noise_cm = round(Int, noise_std * 100)
-    name = "$(method)__$(objective)__$(profile)__$(layout)__noise$(noise_cm)cm"
-    directory = joinpath(output_directory, "runs", name,
-        "fold_$(split.fold)", "repeat_$(split.repeat)")
-    settings = configuration(method, objective, profile, layout, noise_std, ranks)
-    println("Stage $stage: $name, fold $(split.fold), repeat $(split.repeat)")
-    result = Surge.fit_run(pretrained_model, datasets[profile], split, settings, directory)
-    push!(jobs, (stage=stage, method=method, temporal=objective, profile=profile,
-        layout=layout, noise_std=noise_std, fold=split.fold, repeat=split.repeat,
-        directory=directory, best_validation_loss=result.best_validation_loss,
-        best_epoch=result.best_epoch,
-        training_seconds=result.training_seconds, preparation_seconds=result.preparation_seconds))
-    Surge.save_table(joinpath(output_directory, "run_index.tsv"), jobs)
-    return result.best_validation_loss
-end
-
 function main()
     pretrained_model = Surge.load_model(pretrained_file)
     datasets = Dict{Symbol, Any}()
     for profile in (:uniform, :interior, :boundary)
-        dataset = Surge.load_burgers_ensemble(basename(joinpath(data_directory, "$profile.jld2"));
+        dataset = Surge.load_surge_dataset(basename(joinpath(data_directory, "$profile.jld2"));
             data_path=dirname(joinpath(data_directory, "$profile.jld2")))
         datasets[profile] = dataset
     end
+    # Use the same test events and training draws for all conditions.
     event_splits = Surge.make_event_splits(18;
         fold_count=5, folds=collect(1:5), repeats=collect(1:3),
         training_event_count=2, validation_event_count=4,
         selection_seed=42000, training_seed=420000)
 
+    # Select LoRA ranks from each outer training pool or load saved ranks.
     rank_file = joinpath(output_directory, "rank_selection", "selected_ranks.toml")
     ranks = Dict{Int, Vector{Int}}()
     if isfile(rank_file)
@@ -138,100 +125,74 @@ function main()
     for fold in 1:5
         fold_splits = filter(split -> split.fold == fold, event_splits)
 
-        # Experiment 1:
+        # Experiment 1: compare methods with uniform drag, four gauges and no noise.
         method_scores = NamedTuple[]
         for method in adaptation_methods
             validation_losses = Float64[]
             for split in fold_splits
-                loss = run_condition!(jobs, pretrained_model, datasets, ranks,
-                    1, method, :balanced, :uniform, :both, 0.0, split)
+                settings = configuration(method, :balanced, :uniform, :both, 0.0, ranks)
+                loss = SparseCampaign.run_condition!(jobs, pretrained_model, datasets[:uniform], settings,
+                    1, :balanced, :uniform, :both, split)
                 push!(validation_losses, loss)
             end
             push!(method_scores, (candidate=method, validation=mean(validation_losses)))
         end
+        # Select the method with the lowest mean validation loss across repeats.
         sort!(method_scores; by=score -> (score.validation, string(score.candidate)))
         Surge.save_table(joinpath(output_directory, "selections", "method_fold_$fold.tsv"), method_scores)
         selected_method = first(method_scores).candidate
 
-        # Experiment 2:
+        # Experiment 2: compare temporal objectives with the selected method.
         objective_scores = NamedTuple[]
         for objective in selection_objectives
             validation_losses = Float64[]
             for split in fold_splits
-                loss = run_condition!(jobs, pretrained_model, datasets, ranks,
-                    2, selected_method, objective, :uniform, :both, 0.0, split)
+                settings = configuration(selected_method, objective, :uniform, :both, 0.0, ranks)
+                loss = SparseCampaign.run_condition!(jobs, pretrained_model, datasets[:uniform], settings,
+                    2, objective, :uniform, :both, split)
                 push!(validation_losses, loss)
             end
             push!(objective_scores, (candidate=objective, validation=mean(validation_losses)))
         end
+        # Select the temporal objective by validation loss for the next experiments.
         sort!(objective_scores; by=score -> (score.validation, string(score.candidate)))
         Surge.save_table(joinpath(output_directory, "selections", "temporal_fold_$fold.tsv"), objective_scores)
         selected_objective = first(objective_scores).candidate
+        # Run extra temporal controls without using them for objective selection.
         for objective in additional_objectives
             for split in fold_splits
-                run_condition!(jobs, pretrained_model, datasets, ranks,
-                    2, selected_method, objective, :uniform, :both, 0.0, split)
+                settings = configuration(selected_method, objective, :uniform, :both, 0.0, ranks)
+                SparseCampaign.run_condition!(jobs, pretrained_model, datasets[:uniform], settings,
+                    2, objective, :uniform, :both, split)
             end
         end
 
-        # Experiment 3:
+        # Experiment 3: vary drag and gauge layout. Keep the selected method and objective.
         for (profile, layout) in geometry_cases
             for split in fold_splits
-                run_condition!(jobs, pretrained_model, datasets, ranks,
-                    3, selected_method, selected_objective, profile, layout, 0.0, split)
+                settings = configuration(selected_method, selected_objective, profile, layout, 0.0, ranks)
+                SparseCampaign.run_condition!(jobs, pretrained_model, datasets[profile], settings,
+                    3, selected_objective, profile, layout, split)
             end
         end
 
-        # Experiment 4:
+        # Experiment 4: vary observation noise with uniform drag and four gauges.
         for noise_std in noise_standard_deviations
             for split in fold_splits
-                run_condition!(jobs, pretrained_model, datasets, ranks,
-                    4, selected_method, selected_objective, :uniform, :both, noise_std, split)
+                settings = configuration(selected_method, selected_objective, :uniform, :both, noise_std, ranks)
+                SparseCampaign.run_condition!(jobs, pretrained_model, datasets[:uniform], settings,
+                    4, selected_objective, :uniform, :both, split)
             end
         end
     end
 
-    evaluated_directories = Set{String}()
-    for job in jobs
-        if job.directory in evaluated_directories
-            continue
-        end
-        push!(evaluated_directories, job.directory)
-        metrics_path = joinpath(job.directory, "diagnostics", "metrics.tsv")
-        if !isfile(metrics_path)
-            save_series = job.method == :full && job.profile == :uniform && job.layout == :both &&
-                job.noise_std == 0.0 && job.temporal in (:balanced, :long, :one_step)
-            ExperimentDiagnostics.diagnose_saved_run(job.directory, datasets[job.profile];
-                pretrained_model=pretrained_model, forecast_hours=72.0,
-                interior_indices=collect(9:92), interval_boundaries=[0.0, 12.0, 24.0, 48.0, 72.0],
-                save_series=save_series)
-        end
-    end
-
-    metrics = NamedTuple[]
-    for job in jobs
-        rows = Surge.load_table(joinpath(job.directory, "diagnostics", "metrics.tsv"))
-        if job.stage == 1
-            condition = string(job.method)
-        elseif job.stage == 2
-            condition = string(job.temporal)
-        elseif job.stage == 3
-            condition = "$(job.profile)__$(job.layout)"
-        else
-            condition = "noise$(round(Int, 100 * job.noise_std))cm"
-        end
-        for row in rows
-            push!(metrics, (stage=job.stage, condition=condition, fold=job.fold,
-                repeat=job.repeat, training_seconds=job.training_seconds, row...))
-        end
-    end
+    # Evaluate each saved fit once and save event scores and stage summaries.
+    SparseCampaign.evaluate_runs!(jobs, pretrained_model, datasets;
+        forecast_hours=72.0, interior_indices=collect(9:92),
+        interval_boundaries=[0.0, 12.0, 24.0, 48.0, 72.0])
+    metrics = SparseCampaign.collect_metrics(jobs)
     Surge.save_table(joinpath(output_directory, "event_metrics.tsv"), metrics)
-
-    columns = (:stage, :condition, :model, :from_hours, :to_hours, :events,
-        :mse_h, :mse_u, :anomaly_mse, :bias_squared, :training_seconds)
-    summaries = [NamedTuple{columns}(Tuple(getproperty(row, key) for key in columns))
-        for row in ExperimentDiagnostics.summarize_run_diagnostics(metrics;
-            group_by=(:stage, :condition, :model, :from_hours, :to_hours))]
+    summaries = SparseCampaign.summarize_metrics(metrics)
     Surge.save_table(joinpath(output_directory, "summary.tsv"), summaries)
 end
 

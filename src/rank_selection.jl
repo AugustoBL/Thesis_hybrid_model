@@ -18,9 +18,9 @@ function kernel_update_spectra(pretrained_model, fitted_model)
     spectra = NamedTuple[]
     # Pair each fitted kernel with the corresponding pretrained kernel.
     for (pretrained_layer, fitted_layer) in zip(pretrained_model.f.layers, fitted_model.f.layers)
-        # Flatten space/input axes into rows; output channels remain columns, matching LoRA factors.
+        # Use (kernel width * input channels, output channels) to match the LoRA factors.
         update = reshape(Float64.(fitted_layer.weight .- pretrained_layer.weight), :, size(pretrained_layer.weight, 3))
-        # Factor the update as U * Diagonal(S) * V' to measure its singular-direction energy.
+        # Use SVD to measure the energy in each update direction.
         decomposition = svd(update)
         push!(spectra, (update=update, singular_values=decomposition.S))
     end
@@ -28,14 +28,14 @@ function kernel_update_spectra(pretrained_model, fitted_model)
 end
 
 """
-Choose the smallest rank retaining a requested fraction of squared kernel-update norm.
+Choose the smallest rank keeping a requested fraction of squared kernel-update norm.
 
 Args:
     singular_values: Descending singular values of a layer's kernel-update matrix.
     threshold: Requested retained-energy fraction, normally between zero and one.
 
 Returns:
-    Retained rank; zero for a zero update, or full available rank if the threshold is not reached.
+    Retained rank. Zero for a zero update, or full available rank if the threshold is not reached.
 """
 function rank_for_energy(singular_values, threshold)
     # Sum of squared singular values equals the squared Frobenius norm of the update.
@@ -47,7 +47,7 @@ function rank_for_energy(singular_values, threshold)
     explained_energy = cumsum(singular_values.^2) ./ energy
     selected_rank = findfirst(fraction -> fraction >= threshold, explained_energy)
     if selected_rank === nothing
-        # Fall back to all singular directions if no cumulative fraction meets the threshold.
+        # Use full rank if the threshold is not reached.
         return length(singular_values)
     end
     return selected_rank
@@ -57,10 +57,10 @@ end
 Select a candidate using the one-standard-error rule on shared inner splits.
 
 Args:
-    candidates: Records with validation_losses (one per repeat), parameter_count, and threshold.
+    candidates: Records with validation_losses (one per repeat), parameter_count and threshold.
 
 Returns:
-    Selected/best indices, mean validation losses, the best candidate's standard error,
+    Selected/best indices, mean validation losses, the best candidate's standard error
     and acceptance cutoff. Selects the smallest parameter count within that cutoff.
 """
 function select_candidate(candidates)
@@ -72,7 +72,7 @@ function select_candidate(candidates)
     repeat_count = length(candidates[best_index].validation_losses)
     standard_error = 0.0
     if repeat_count > 1
-        # Estimate uncertainty from repeated fits; a single repeat leaves the tolerance at zero.
+        # Estimate the standard error across repeats. One repeat gives zero tolerance.
         standard_error = std(candidates[best_index].validation_losses) / sqrt(repeat_count)
     end
     cutoff = validation_means[best_index] + standard_error
@@ -88,7 +88,7 @@ end
 Create shared inner-validation events and repeat-specific training draws.
 
 Args:
-    outer_split: Outer fold, available training pool, and held-out test-event indices.
+    outer_split: Outer fold, available training pool and held-out test-event indices.
     repeats: Repeat identifiers.
     training_event_count: Events sampled for each inner training fit.
     validation_event_count: Events held out for inner validation.
@@ -122,7 +122,7 @@ end
 Build an experiment configuration for a pilot or LoRA candidate fit.
 
 Args:
-    settings: Dataset/model paths, observations, optimizer, seeds, and output directory.
+    settings: Dataset/model paths, observations, optimizer, seeds and output directory.
     training: Training settings for this fit.
     method: Adaptation method (:full for the pilot, :lora for candidates).
     ranks: Fold-to-layer-ranks dictionary for LoRA, or nothing for the pilot.
@@ -132,7 +132,7 @@ Returns:
     Configuration record accepted by Surge.run_experiment.
 """
 function rank_fit_configuration(settings, training, method, ranks, name)
-    # Preserve common data and optimizer settings while replacing the fit-specific choices.
+    # Keep shared data and optimizer settings and change the fit settings.
     return (experiment=1, name=name, output_directory=settings.output_directory,
         dataset_file=settings.dataset_file, pretrained_file=settings.pretrained_file,
         measurement_gap=settings.measurement_gap, training_steps=settings.training_steps,
@@ -150,15 +150,15 @@ Args:
     pretrained_model: Base convolutional surrogate.
     dataset: Event ensemble used for inner fits.
     outer_splits: Outer splits providing fold identifiers and available training pools.
-    settings: Common experiment paths, observations, optimizer, and seeds.
+    settings: Common experiment paths, observations, optimizer and seeds.
     pilot_training: Training settings for the full-adaptation pilot.
     candidate_training: Training settings for LoRA candidate fits.
     thresholds: Retained kernel-update energy fractions defining candidate ranks.
-    inner_split_settings: Counts, repeats, and seeds forwarded to inner_event_splits.
+    inner_split_settings: Counts, repeats and seeds forwarded to inner_event_splits.
 
 Returns:
     Dictionary mapping outer fold to a rank vector (one entry per convolution).
-    Saves pilot spectra, candidate decisions, inner splits, and selected-rank reports.
+    Saves pilot spectra, candidate decisions, inner splits and selected-rank reports.
 """
 function select_ranks(pretrained_model, dataset, outer_splits; settings, pilot_training,
                       candidate_training, thresholds, inner_split_settings)
@@ -173,7 +173,7 @@ function select_ranks(pretrained_model, dataset, outer_splits; settings, pilot_t
         # Fit or reload one full-adaptation pilot using the first inner repeat only.
         pilot_run = only(Surge.run_experiment(pretrained_model, dataset, inner_splits[1:1];
             configuration=pilot_configuration, save_final=true))
-        # Use the final pilot parameters, not its validation-selected checkpoint, for the update spectra.
+        # Use the final pilot parameters for spectra instead of the best validation model.
         pilot_model = Surge.load_model(joinpath(pilot_run.directory, "final_model.bson"))
         spectra = kernel_update_spectra(pretrained_model, pilot_model)
         JLD2.jldsave(joinpath(fold_directory, "update_spectra.jld2"); spectra=spectra)
@@ -185,7 +185,7 @@ function select_ranks(pretrained_model, dataset, outer_splits; settings, pilot_t
             configuration = rank_fit_configuration(settings, candidate_training, :lora, ranks_by_fold,
                 "candidate_" * join(ranks, "_"))
             runs = Surge.run_experiment(pretrained_model, dataset, inner_splits; configuration=configuration)
-            # Compare each fit's best validation loss; parameter count includes trainable biases.
+            # Compare best validation losses. Count trainable biases as parameters.
             losses = [run.result.best_validation_loss for run in runs]
             push!(candidates, (threshold=threshold, ranks=ranks, validation_losses=losses,
                 parameter_count=first(runs).result.trainable_parameters))
@@ -194,7 +194,7 @@ function select_ranks(pretrained_model, dataset, outer_splits; settings, pilot_t
         decision = select_candidate(candidates)
         selected = candidates[decision.selected_index]
         selected_ranks[outer_split.fold] = selected.ranks
-        # Save a readable decision report plus detailed selection data for reproducibility.
+        # Save the selected ranks and the data used to choose them.
         report = Dict("ranks" => selected.ranks, "threshold" => selected.threshold,
             "standard_error" => decision.standard_error, "validation_cutoff" => decision.cutoff,
             "criterion" => "one standard error; minimum validation loss for a single repeat",
@@ -207,7 +207,7 @@ function select_ranks(pretrained_model, dataset, outer_splits; settings, pilot_t
         JLD2.jldsave(joinpath(fold_directory, "selection.jld2"); candidates=candidates,
             decision=decision, inner_splits=inner_splits, outer_split=outer_split)
     end
-    # Also write one combined fold-to-ranks report for the final experiments.
+    # Save the selected ranks for all folds in one file.
     open(joinpath(settings.output_directory, "selected_ranks.toml"), "w") do output
         TOML.print(output, Dict("folds" => Dict(string(fold) => ranks for (fold, ranks) in selected_ranks)))
     end

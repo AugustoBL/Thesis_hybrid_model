@@ -10,28 +10,33 @@ const methods = [:full, :first_two, :last_two, :output, :lora, :film]
 using Flux, LinearAlgebra, Dates
 
 include(joinpath(@__DIR__, "experiment_dependencies.jl"))
+include(joinpath(@__DIR__, "src", "sparse_campaign.jl"))
+include(joinpath(@__DIR__, "src", "adaptation_profiling.jl"))
 
 function main()
+    # Measure saved adaptation methods with a fixed BLAS thread count.
     BLAS.set_num_threads(2)
     output = output_directory
     baseline = baseline_directory
     results = Dict{Symbol, Any}()
     models = Dict{Symbol, Any}()
-    # Load one saved fit per method; no additional adaptation training is performed.
+    # Load one saved fit per method without training again.
     for method in methods
-        name = "$(method)__balanced__uniform__both__noise0cm"
-        directory = joinpath(baseline, "runs", name, "fold_$fold", "repeat_1")
+        directory = SparseCampaign.run_directory(baseline, method, :balanced, :uniform, :both,
+            0.0, (fold=fold, repeat=1))
         results[method] = JLD2.load(joinpath(directory, "result.jld2"), "result")
         models[method] = Surge.load_model(joinpath(directory, "best_model.bson"))
     end
+    # Use the same data split and reference scales for all timing comparisons.
     configuration = results[:full].configuration
     split = results[:full].split
-    dataset = Surge.load_burgers_ensemble(basename(dataset_file);
+    dataset = Surge.load_surge_dataset(basename(dataset_file);
         data_path=dirname(dataset_file))
     training_data, validation_data = Surge.prepare_training_split(dataset, split, configuration)
     pretrained_model = Surge.load_model(pretrained_file)
     normalizers = Surge.compute_pretrained_error_scales(pretrained_model, training_data,
         configuration.training, configuration.stations)
+    # Use the same first batch and pretrained starting states for all methods.
     windows = Surge.enumerate_training_windows(training_data, configuration.training)
     raw_batch = first(Surge.prepare_window_batches(training_data, windows,
         configuration.training, configuration.stations))
@@ -40,58 +45,15 @@ function main()
         configuration.training.rollout_horizons, normalizers)
     objective = model -> Surge.rollout_objective(model, batch.state, batch.forcing,
         batch.targets, configuration.stations, batch.horizons, batch.normalizers)
-    # Isolated microbenchmarks retain allocations/GC, standalone forward passes,
-    # and optimizer-only costs, which train_model! phase totals do not measure.
-    actions = Dict{Symbol, Any}()
-    for method in methods
-        model = models[method]
-        gradient = Flux.gradient(objective, model)[1]
-        update_model = deepcopy(model)
-        optimizer = Flux.setup(Flux.Adam(3e-6), update_model)
-        actions[method] = (
-            kernel_materialization=() -> Surge.effective_model(model),
-            forward=() -> objective(model),
-            forward_reverse=() -> Flux.gradient(objective, model),
-            optimizer=() -> Flux.update!(optimizer, update_model, gradient),
-            state_regeneration=() -> Surge.precompute_rollout_states(model, training_data),
-            validation=() -> Surge.validation_loss(model, validation_data, configuration.stations))
-    end
+    # Warm up the separate operations and time them on the same batch.
+    actions = AdaptationProfiling.build_actions(models, methods, objective,
+        training_data, validation_data, configuration.stations)
+    rows = AdaptationProfiling.measure_actions(actions, methods; fold=fold, samples=samples, warmup=warmup)
 
-    phases = propertynames(actions[:full])
-    println("Warming all six methods; compilation is excluded from measured samples.")
-    for method in methods
-        for phase in phases
-            for warmup_index in 1:warmup
-                getproperty(actions[method], phase)()
-            end
-        end
-    end
-
+    # Save timing samples, summaries and environment details.
     mkpath(output)
-    rows = NamedTuple[]
-    random_generator = MersenneTwister(20261016)
-    for sample in 1:samples
-        for method in shuffle(random_generator, methods)
-            for phase in shuffle(random_generator, collect(phases))
-                GC.gc()
-                measurement = @timed getproperty(actions[method], phase)()
-                push!(rows, (method=string(method), fold=fold, sample=sample, phase=string(phase),
-                    seconds=measurement.time, allocated_bytes=measurement.bytes, gc_seconds=measurement.gctime))
-            end
-        end
-        println("Completed timing sample $sample/$samples")
-    end
     Surge.save_table(joinpath(output, "samples.tsv"), rows)
-    summary = NamedTuple[]
-    for method in methods
-        for phase in phases
-            selected = filter(row -> row.method == string(method) && row.phase == string(phase), rows)
-            times = [row.seconds for row in selected]
-            push!(summary, (method=string(method), phase=string(phase), median_seconds=median(times),
-                q25_seconds=quantile(times, 0.25), q75_seconds=quantile(times, 0.75),
-                median_allocated_bytes=median([row.allocated_bytes for row in selected])))
-        end
-    end
+    summary = AdaptationProfiling.summarize_measurements(rows, methods, propertynames(actions[:full]))
     Surge.save_table(joinpath(output, "summary.tsv"), summary)
 
     open(joinpath(output, "environment.txt"), "w") do io

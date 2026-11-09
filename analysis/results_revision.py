@@ -4,13 +4,21 @@ Run from the repository root: python analysis/results_revision.py
 No experiments, forecasts or other thesis figures are regenerated.
 """
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 import results_section as results
-from chapter_6 import LABELS, STYLES, save
+from results_common import LABELS, STYLES, read_tsv, save
 
 
 def main():
+    output = results.OUT
+    output.mkdir(parents=True, exist_ok=True)
+    summary = read_tsv(results.ROOT / 'summary.tsv')
+    events = read_tsv(results.ROOT / 'event_metrics.tsv')
+    jobs = read_tsv(results.ROOT / 'run_index.tsv')
+    audit = []
     plt.rcParams.update({
         'font.family': 'DejaVu Sans', 'font.size': 9.5,
         'axes.labelsize': 9.5, 'xtick.labelsize': 9,
@@ -20,20 +28,20 @@ def main():
     objectives = list(LABELS)
     conditions = [('long', 'pretrained') if key == 'frozen' else (key, 'adapted')
                   for key in objectives]
-    results.panels(2, conditions, [LABELS[key] for key in objectives],
+    results.panels(summary, events, audit, output, 2, conditions, [LABELS[key] for key in objectives],
                    'temporal_tradeoff_flux')
 
     fig, ax = plt.subplots(figsize=(15 / 2.54, 4.2))
     values = []
     for key, (condition, model) in zip(objectives, conditions):
-        fits = [job for job in results.jobs
+        fits = [job for job in jobs
                 if job['stage'] == '2' and job['temporal'] == key]
         if key == 'frozen':
             cost = 0.0
         else:
             assert len(fits) == 15
             cost = np.mean([float(job['training_seconds']) for job in fits])
-        error = 1000 * np.sqrt(results.value(2, condition, model, 0., 'mse_h'))
+        error = 1000 * np.sqrt(results.value(summary, events, audit, 2, condition, model, 0., 'mse_h'))
         values.append(error)
         ax.scatter(cost, error, **STYLES[key], s=42, label=LABELS[key])
     ax.set(yscale='log', xlabel='Mean training-loop time per fit (s)',
@@ -43,7 +51,7 @@ def main():
     fig.legend(*ax.get_legend_handles_labels(), loc='lower center',
                ncol=3, frameon=False)
     fig.tight_layout(rect=(0, .19, 1, 1))
-    save(fig, results.OUT, 'forecast_length_computation_cost_0to12h_flux')
+    save(fig, output, 'forecast_length_computation_cost_0to12h_flux')
     print('Verified equal-event aggregates and regenerated only the two temporal figures.')
 
 

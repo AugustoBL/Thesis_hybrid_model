@@ -13,12 +13,15 @@ const pretraining_settings = (
 )
 
 include(joinpath(@__DIR__, "experiment_dependencies.jl"))
+include(joinpath(@__DIR__, "src", "source_pretraining.jl"))
 
 function main()
-    source_dataset = Surge.load_burgers_ensemble(basename(source_file);
+    # Load the source data and its model timestep.
+    source_dataset = Surge.load_surge_dataset(basename(source_file);
         data_path=dirname(source_file))
     time_step = first(source_dataset.times)
 
+    # Use separate source events for training, validation and testing.
     training_pairs = Surge.one_step_pairs(source_dataset, source_training_events)
     validation_pairs = Surge.one_step_pairs(source_dataset, source_validation_events)
     test_pairs = Surge.one_step_pairs(source_dataset, source_test_events)
@@ -29,19 +32,20 @@ function main()
         dt=time_step, dx=source_dataset.params.dx)
     directory = joinpath(output_directory, "pretraining", "flux_correction")
 
+    # Build the flux-correction CNN and train or load a completed fit.
     Random.seed!(pretraining_settings.seed)
     model = Surge.build_flux_correction_cnn(hidden_channels, filter_width;
         dt=time_step, dx=source_dataset.params.dx)
     record = SourcePretraining.pretrain(model, training_pairs, validation_pairs, directory;
         specification=specification)
 
+    # Test the best validation model on source test pairs and save the scores.
     test_loss = Surge.one_step_loss(record.model, test_pairs, pretraining_settings.batch_size)
     JLD2.jldsave(joinpath(directory, "specification.jld2"); specification=specification, test_loss=test_loss)
     summary = [(architecture=:flux_correction, best_epoch=record.result.best_epoch,
         validation_mse=record.result.best_validation_loss, source_test_mse=test_loss,
         trainable_parameters=Surge.trainable_parameter_count(record.model), checkpoint=record.path)]
     Surge.save_table(joinpath(output_directory, "pretraining", "summary.tsv"), summary)
-    println("Selected source checkpoint: $(record.path)")
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__

@@ -1,41 +1,10 @@
 """
-Write named records as a tab-separated table.
-
-Args:
-    path: Destination filepath; existing output is overwritten.
-    rows: Nonempty collection of records sharing named columns.
-
-Returns:
-    Output filepath.
-"""
-function save_table(path, rows; delimiter='\t')
-    mkpath(dirname(path))
-    open(path, "w") do output
-        columns = propertynames(first(rows))
-        println(output, join(string.(columns), delimiter))
-        for row in rows
-            println(output, join((getproperty(row, column) for column in columns), delimiter))
-        end
-    end
-    return path
-end
-
-"""Read a numeric/symbol TSV written by save_table."""
-function load_table(path)
-    lines = readlines(path)
-    columns = Tuple(Symbol.(split(first(lines), '\t')))
-    parse_field = value -> value == "true" ? true : value == "false" ? false :
-        something(tryparse(Int, value), tryparse(Float64, value), Symbol(value))
-    return [NamedTuple{columns}(Tuple(parse_field.(split(line, '\t')))) for line in lines[2:end]]
-end
-
-"""
 Prepare sparse water-level training and validation observations.
 
 Args:
     dataset: Full event ensemble and physical parameters.
     split: Training/validation event indices and random seed.
-    configuration: Training duration [steps], stations, measurement gap, and noise settings [m].
+    configuration: Training duration [steps], stations, measurement gap and noise settings [m].
 
 Returns:
     Training and validation datasets with noise-free initial states and configured observation noise.
@@ -64,12 +33,12 @@ Load a completed adaptation run or train a fresh run and save its models.
 Args:
     pretrained_model: Base surrogate for adaptation and reference error scales.
     dataset: Full event ensemble.
-    split: Event memberships, fold, repeat, and seed.
-    configuration: Adaptation, optimizer, observation, and training settings.
-    directory: Directory for checkpoints, models, and run metadata.
+    split: Event memberships, fold, repeat and seed.
+    configuration: Adaptation, optimizer, observation and training settings.
+    directory: Directory for checkpoints, models and run metadata.
 
 Returns:
-    Run result containing configuration, split, history, validation selection, counts, and loss scales.
+    Run result with configuration, split, history, validation selection, counts and loss scales.
 """
 function fit_run(pretrained_model, dataset, split, configuration, directory; save_final=false)
     result_path = joinpath(directory, "result.jld2")
@@ -121,11 +90,11 @@ Fit the configured adaptation for each event split.
 Args:
     pretrained_model: Base surrogate to adapt.
     dataset: Full event ensemble and physical parameters.
-    splits: Fold/repeat training, validation, and test memberships.
-    configuration: Input paths, output root, experiment identity, and fitting settings.
+    splits: Fold/repeat training, validation and test memberships.
+    configuration: Input paths, output root, experiment identity and fitting settings.
 
 Returns:
-    Vector of directory/result records; completed runs are reused.
+    Vector of directory/result records. Completed runs are reused.
 """
 function run_experiment(pretrained_model, dataset, splits; configuration, save_final=false)
     runs = NamedTuple[]

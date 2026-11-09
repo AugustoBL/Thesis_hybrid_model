@@ -1,26 +1,14 @@
-# model_1d_wave_periodic.jl
-# 1D linearized shallow-water equation with wind stress
-#
-#The one-dimensional shallow-water equations can be simplified to a 
-# 1D wave-equation with wind forcing:
-#
-#$\partial h/\partial t + \partial Hu / \partial x = 0$
-#
-#$\partial u/\partial t + g \partial h / \partial x = \tau/(\rho H)$
-#
-#where $h$ denotes the water-height above the reference, $u$ the 
-#velocity, $D$ the depth below the reference, $H=D+h$ the total water 
-#depth and $t,x$ time and space.
-#
-# The equations and approach are similar to the model_1d_wave_periodic.jl 
-# model. Here the equations are not fully linear, on a 'closed' domain,
-# and with a wind-stress forcing term.
+# One-dimensional surge equations with wind stress on a staggered grid.
+# The main terms are:
+# $\partial h/\partial t + \partial Hu / \partial x = 0$
+# $\partial u/\partial t + g \partial h / \partial x = \tau/(\rho H)$
+# h is water level, u is velocity and D is depth below the reference level.
+# Total depth is H = D + h. Time is t and position is x.
+# The domain has closed boundaries. The full model also includes friction.
 
 """
     Wave1DSurge_cpu
-    container for the parameters of the 1D wave equation
-    We use a 'functor', i.e. a struct that behaves like a function.
-    So this function can contain data, eg parameters.
+    Store the surge parameters in a struct that can be called as a function.
 """
 struct Wave1DSurge_cpu
     g::Float64 # gravity
@@ -32,7 +20,6 @@ struct Wave1DSurge_cpu
     rho::Float64 # density
     C::Float64 # Chezy friction factor
     tau::Function # function of time t: Float64 -> Float64
-                    # wind stress as a function of time
     q_left::Function # inflow at left boundary
     q_right::Function # outflow at right boundary
 end
@@ -117,18 +104,17 @@ end
 function (f::Wave1DSurge_cpu)(dx_dt,x,p,t)
     g=f.g       # gravity
     D=f.D       # depth profile
-    dx=f.dx     # spatial step 
+    dx=f.dx     # spatial step
     rho=f.rho   # density
     C=f.C       # Chezy friction factor
     tau_val = f.tau(t) # wind stress
     W=f.W       # width (only used for boundary)
     q_left_val=f.q_left(t) # inflow at left boundary [m^3/s]
     q_right_val=f.q_right(t) # outflow at right boundary
-    # temporary variables
-    ∂h∂x = similar(x.u) # allocating version, is not optimal for performance
+    ∂h∂x = similar(x.u) # This allocates a new array on each call.
     ∂Hu∂x = similar(x.h)
     h_avg = similar(x.u)
-    # compute spatial derivatives and averages
+    # Calculate spatial derivatives and averages.
     avg_h!(h_avg,x.h,dx)
     H=h_avg .+ D
     u=x.u
@@ -137,7 +123,7 @@ function (f::Wave1DSurge_cpu)(dx_dt,x,p,t)
     Hu=H .* u
     du_dx!(∂Hu∂x,Hu,dx)
     dh_dx!(∂h∂x,x.h,dx)
-    # compute time derivatives
+    # Calculate time derivatives.
     @. dx_dt.u = -g * ∂h∂x + tau_val/(rho * H) - (g*x.u*abs(x.u))/(C*C*H)
     dx_dt.u[1]=0.0
     dx_dt.u[end]=0.0

@@ -4,20 +4,22 @@ Run from the repository root: python analysis/review_evidence.py
 """
 import csv
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import results_section as figures
-from chapter_6 import expected_keys, local_run, save
+from results_common import LABELS, read_tsv, expected_keys, local_run, save
 
 
-def write_rows(name, rows):
-    with (figures.OUT / name).open('w', newline='', encoding='utf-8') as stream:
+def write_rows(output, name, rows):
+    with (output / name).open('w', newline='', encoding='utf-8') as stream:
         writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
 
 
-def event_rmse(stage, condition, start):
-    rows = [r for r in figures.events if int(r['stage']) == stage
+def event_rmse(events, stage, condition, start):
+    rows = [r for r in events if int(r['stage']) == stage
             and r['condition'] == condition and r['model'] == 'adapted'
             and float(r['from_hours']) == start]
     keys = [(int(r['fold']), int(r['repeat']), int(r['event'])) for r in rows]
@@ -27,7 +29,7 @@ def event_rmse(stage, condition, start):
                      for event in range(1, 19)])
 
 
-def paired_events():
+def paired_events(events, output):
     fig, axes = plt.subplots(1, 2, figsize=(15/2.54, 5.2), sharey=True)
     rows = []
     for ax, (stage, first, second, title) in zip(axes, [
@@ -35,8 +37,8 @@ def paired_events():
             (2, 'balanced', 'long', 'Multi-step versus long-128')]):
         for start, color, marker, label in [(0., '#0072B2', 'o', '0-12 h'),
                                            (48., '#D55E00', 's', '48-72 h')]:
-            change = 100 * (event_rmse(stage, first, start) /
-                            event_rmse(stage, second, start) - 1)
+            change = 100 * (event_rmse(events, stage, first, start) /
+                            event_rmse(events, stage, second, start) - 1)
             ax.scatter(change, np.arange(1, 19), c=color, marker=marker, label=label, s=30)
             rows.extend(dict(comparison=f'{first}_vs_{second}', event=event,
                              from_hours=start, rmse_change_percent=float(delta))
@@ -48,12 +50,12 @@ def paired_events():
     axes[0].invert_yaxis()
     fig.legend(*axes[1].get_legend_handles_labels(), loc='lower center', ncol=2, frameon=False)
     fig.tight_layout(rect=(0, .06, 1, 1))
-    save(fig, figures.OUT, 'paired_event_rmse_changes')
-    write_rows('paired_event_rmse_changes.csv', rows)
+    save(fig, output, 'paired_event_rmse_changes')
+    write_rows(output, 'paired_event_rmse_changes.csv', rows)
 
 
-def observation_history():
-    jobs = [j for j in figures.jobs if int(j['stage']) == 1 and j['method'] == 'full']
+def observation_history(root, jobs, output):
+    jobs = [j for j in jobs if int(j['stage']) == 1 and j['method'] == 'full']
     assert len(jobs) == 15
     means = {}
     reference_steps = None
@@ -62,7 +64,7 @@ def observation_history():
         for job in jobs:
             fold = int(job['fold'])
             for event in range((fold-1)*18//5+1, fold*18//5+1):
-                path = local_run(figures.ROOT, job) / 'diagnostics' / f'{model}_event_{event}.tsv'
+                path = local_run(root, job) / 'diagnostics' / f'{model}_event_{event}.tsv'
                 array = np.loadtxt(path, delimiter='\t', skiprows=1, usecols=(0, 6, 7))
                 if reference_steps is None:
                     reference_steps = array[:, 0]
@@ -89,8 +91,8 @@ def observation_history():
     axes[0].legend(frameon=False, loc='lower right', ncol=2)
     axes[1].set_xlabel('Forecast lead (h)')
     fig.tight_layout()
-    save(fig, figures.OUT, 'observed_unobserved_rmse')
-    write_rows('observed_unobserved_rmse.csv', [
+    save(fig, output, 'observed_unobserved_rmse')
+    write_rows(output, 'observed_unobserved_rmse.csv', [
         dict(lead_hours=float(t), frozen_gauges_mm=float(means['pretrained'][i, 0]),
              adapted_gauges_mm=float(means['adapted'][i, 0]),
              frozen_interior_mm=float(means['pretrained'][i, 1]),
@@ -99,21 +101,28 @@ def observation_history():
 
 
 def main():
+    root, output = figures.ROOT, figures.OUT
+    output.mkdir(parents=True, exist_ok=True)
+    summary = read_tsv(root / 'summary.tsv')
+    events = read_tsv(root / 'event_metrics.tsv')
+    jobs = read_tsv(root / 'run_index.tsv')
+    audit = []
+    plt.rcParams.update({'font.size': 11, 'pdf.fonttype': 42, 'svg.fonttype': 'none'})
     parameters = ['full', 'first_two', 'lora', 'last_two', 'output', 'film']
-    figures.panels(1, [('full', 'pretrained')]+[(c, 'adapted') for c in parameters],
+    figures.panels(summary, events, audit, output, 1, [('full', 'pretrained')]+[(c, 'adapted') for c in parameters],
                    ['Frozen', 'Full', 'First two', 'LoRA', 'Last two', 'Output only', 'FiLM'],
                    'parameter_accuracy_flux')
-    objectives = list(figures.LABELS)
+    objectives = list(LABELS)
     conditions = [('long' if c == 'frozen' else c, 'pretrained' if c == 'frozen' else 'adapted')
                   for c in objectives]
-    figures.panels(2, conditions, [figures.LABELS[c] for c in objectives], 'temporal_tradeoff_flux')
-    geometry = list(dict.fromkeys(r['condition'] for r in figures.summary
+    figures.panels(summary, events, audit, output, 2, conditions, [LABELS[c] for c in objectives], 'temporal_tradeoff_flux')
+    geometry = list(dict.fromkeys(r['condition'] for r in summary
                                  if r['stage'] == '3' and r['model'] == 'adapted'))
     layouts = {'both': 'Two-sided', 'one': 'One-sided', 'eight': 'Boundary-dense', 'spread': 'Domain-spread'}
     labels = [f'{c.split("__")[0].capitalize()}: {layouts[c.split("__")[1]]}' for c in geometry]
-    figures.panels(3, [(c, 'adapted') for c in geometry], labels, 'observation_geometry_flux')
-    paired_events()
-    observation_history()
+    figures.panels(summary, events, audit, output, 3, [(c, 'adapted') for c in geometry], labels, 'observation_geometry_flux')
+    paired_events(events, output)
+    observation_history(root, jobs, output)
 
 
 if __name__ == '__main__':

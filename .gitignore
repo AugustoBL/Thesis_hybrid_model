@@ -25,3 +25,4 @@ Thumbs.db
 **/run_index.jld2
 **/jobs.jld2
 **/rollout_cache*.jld2
+/test/

@@ -15,18 +15,22 @@ const training_settings = (
 )
 
 include(joinpath(@__DIR__, "experiment_dependencies.jl"))
-include(joinpath(@__DIR__, "shared", "gauge_curriculum_analysis.jl"))
+include(joinpath(@__DIR__, "src", "gauge_curriculum_analysis.jl"))
+include(joinpath(@__DIR__, "src", "sparse_campaign.jl"))
 import .GaugeCurriculumAnalysis
 
 function configuration(case, temporal)
+    # Experiment 6: test fewer gauges and a faster curriculum with full adaptation.
     stations = [2, 4, 97, 99]
     settings = training_settings
     if case == :two_gauges
+        # Use lead 128 if this fold selected long. Otherwise use balanced leads.
         stations = [2, 99]
         if temporal == :long
             settings = merge(settings, (loss_mode=:endpoint,))
         end
     elseif case == :curriculum_fast
+        # Keep four gauges and add longer leads earlier in training.
         settings = merge(settings, (curriculum_enabled=true,
             curriculum_boundaries=[0.05, 0.10, 0.15]))
     end
@@ -43,17 +47,20 @@ function configuration(case, temporal)
 end
 
 function main()
-    dataset = Surge.load_burgers_ensemble("uniform.jld2"; data_path=data_directory)
+    # Use the same uniform-drag data, pretrained model and splits as the main experiments.
+    dataset = Surge.load_surge_dataset("uniform.jld2"; data_path=data_directory)
     pretrained_model = Surge.load_model(pretrained_file)
     event_splits = Surge.make_event_splits(18;
         fold_count=5, folds=1:5, repeats=1:3,
         training_event_count=2, validation_event_count=4,
         selection_seed=42000, training_seed=420000)
+    # Load each fold's selected temporal objective for the two-gauge case.
     selected_objectives = Dict(fold => first(Surge.load_table(joinpath(baseline_directory,
         "selections", "temporal_fold_$fold.tsv"))).candidate for fold in 1:5)
 
     jobs = NamedTuple[]
     index_rows = NamedTuple[]
+    # Train or load both cases for each fold and repeat.
     for case in reported_cases, event_split in event_splits
         settings = configuration(case, selected_objectives[event_split.fold])
         directory = joinpath(output_directory, "runs", string(case),
@@ -66,6 +73,7 @@ function main()
     end
     Surge.save_table(joinpath(output_directory, "indices", "reported_cases.tsv"), index_rows)
 
+    # Load saved interval scores or evaluate both models on test events.
     metrics = NamedTuple[]
     for job in jobs
         path = joinpath(job.directory, "evaluation", "interval_metrics.jld2")
@@ -86,15 +94,15 @@ function main()
         end
     end
 
-    # Read paired baseline scores from the main campaign; no duplicate forecasts or reference files.
+    # Load the main experiment controls for matching folds and repeats.
     for event_split in event_splits
         temporal = selected_objectives[event_split.fold]
         for (case, objective, layout) in ((:four_gauges, temporal, :both),
                 (:eight_gauges, temporal, :eight), (:balanced, :balanced, :both),
                 (:curriculum, :curriculum, :both))
-            name = "full__$(objective)__uniform__$(layout)__noise0cm"
-            path = joinpath(baseline_directory, "runs", name,
-                "fold_$(event_split.fold)", "repeat_$(event_split.repeat)", "diagnostics", "metrics.tsv")
+            directory = SparseCampaign.run_directory(baseline_directory, :full, objective,
+                :uniform, layout, 0.0, event_split)
+            path = joinpath(directory, "diagnostics", "metrics.tsv")
             for row in Surge.load_table(path)
                 identity = (model=row.model, event=row.event, finite_rollout=all(isfinite, values(row)[3:end]))
                 scores = Base.structdiff(row, (model=row.model, event=row.event))
@@ -103,6 +111,7 @@ function main()
         end
     end
 
+    # Average repeats per event and compare cases on matching test events.
     event_means, summaries = GaugeCurriculumAnalysis.aggregate(metrics)
     Surge.save_table(joinpath(output_directory, "event_metrics.tsv"), metrics)
     Surge.save_table(joinpath(output_directory, "event_means.tsv"), event_means)

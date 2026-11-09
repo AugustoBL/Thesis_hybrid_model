@@ -3,22 +3,21 @@ Forecast one event from its initial state without resetting predictions.
 
 Args:
     model: Surrogate mapping features `(space, 5, batch)` to state `(space, 2, batch)`.
-    event: Trajectory including initial h [m], u [m/s], and prescribed stress [Pa].
-    params: Physical parameters containing face depths [m].
+    event: Trajectory including initial h [m], u [m/s] and prescribed stress [Pa].
+    params: Physical parameters with face depths [m].
 
 Returns:
     Named tuple with Float32 prediction and target arrays `(N + 1, 2, steps)`, excluding the initial state.
     Channels are cell h [m] with a padded final row, then face u [m/s].
 """
 function forecast_event(model, event, params)
-    # Each transition consumes the current forcing and targets the next stored state.
+    # Each step uses current forcing to predict the next stored state.
     n_steps = length(event) - 1
     first_input = _model_input(first(event), params)
     n_grid_points = size(first_input, 1)
-    # Store each predicted state and its reference at the same forecast step.
     prediction = zeros(Float32, n_grid_points, 2, n_steps)
     target = zeros(Float32, n_grid_points, 2, n_steps)
-    # Add a singleton batch axis: (space, 2, 1).
+    # Add a batch axis of size 1: (space, 2, 1).
     state = reshape(first_input[:, 1:2], n_grid_points, 2, 1)
 
     for step in 1:n_steps
@@ -26,7 +25,7 @@ function forecast_event(model, event, params)
         forcing = reshape(model_input[:, 3:5], n_grid_points, 3, 1)
         # Concatenate predicted h/u and forcing to form (space, 5, 1) input.
         state = model(cat(state, forcing; dims=2))
-        # Remove the singleton batch axis for the saved space/channel/time layout.
+        # Remove the batch axis to save (space, channel, time).
         prediction[:, :, step] .= state[:, :, 1]
         target[:, :, step] .= _model_target(event[step + 1])
     end
@@ -38,14 +37,15 @@ Evaluate saved adapted and pretrained models on held-out events.
 
 Args:
     run: Run record with its directory and test-event membership.
-    dataset: Event trajectories, parameters, cell/face grids, and elapsed prediction times [s].
+    dataset: Event trajectories, parameters, cell/face grids and elapsed prediction times [s].
     pretrained_model: Baseline surrogate with matching geometry.
     forecast_hours: Maximum forecast duration [hours].
 
 Returns:
     Per-event metrics, MSE maps `(N + 1, 2, steps)` averaged over test events,
-    the first test-event forecast, elapsed times [s], and grids [m].
-    Saves evaluation/primary.jld2 and evaluation/metrics.tsv; h MSE is [m^2], u MSE [m^2/s^2].
+    the first test-event forecast, elapsed times [s] and grids [m].
+    Saves evaluation/primary.jld2 and evaluation/metrics.tsv.
+    MSE units are [m^2] for h and [m^2/s^2] for u.
 """
 function evaluate_run(run, dataset, pretrained_model; forecast_hours)
     # Evaluate the validation-selected adapted model saved for this run.
@@ -65,7 +65,7 @@ function evaluate_run(run, dataset, pretrained_model; forecast_hours)
         # Compare each model against the same numerical reference trajectory.
         error = (forecast.prediction .- forecast.target).^2
         baseline_error = (baseline.prediction .- baseline.target).^2
-        # Sum errors across events while retaining spatial, channel, and time axes.
+        # Sum errors across events. Keep the space, channel and time axes.
         squared_errors .+= error
         baseline_errors .+= baseline_error
         # Exclude the padded h row from scalar MSE
@@ -80,7 +80,7 @@ function evaluate_run(run, dataset, pretrained_model; forecast_hours)
                 target=forecast.target, baseline=baseline.prediction)
         end
     end
-    # Average over events only, preserving the (space, 2, steps) map layout.
+    # Average over events only. Keep the (space, 2, steps) error map.
     result = (metrics=metrics, mse=squared_errors ./ length(event_indices),
         baseline_mse=baseline_errors ./ length(event_indices), forecast=saved_forecast,
         times=dataset.times[1:step_count], grid=dataset.grid)
