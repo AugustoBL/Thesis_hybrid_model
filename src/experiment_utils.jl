@@ -59,7 +59,7 @@ function prepare_training_split(dataset, split, configuration)
 end
 
 """
-Load, resume, or train one adaptation run and save its models.
+Load a completed adaptation run or train a fresh run and save its models.
 
 Args:
     pretrained_model: Base surrogate for adaptation and reference error scales.
@@ -81,19 +81,13 @@ function fit_run(pretrained_model, dataset, split, configuration, directory; sav
         return result
     end
     mkpath(directory)
-    previous = isfile(checkpoint_path) ? JLD2.load(checkpoint_path, "saved") : nothing
-    if previous !== nothing
-        isequal(previous.configuration, configuration) && isequal(previous.split, split) ||
-            error("Checkpoint settings differ: $directory")
-    end
     preparation_start = time_ns()
     training_data, validation_data = prepare_training_split(dataset, split, configuration)
     normalizers = compute_pretrained_error_scales(pretrained_model, training_data,
         configuration.training, configuration.stations)
     ranks = configuration.adaptation.method == :lora ? configuration.adaptation.ranks[split.fold] : nothing
     model = configure_adaptation(pretrained_model, configuration.adaptation.method; seed=split.seed, ranks=ranks)
-    preparation_seconds = (time_ns() - preparation_start) / 1e9 +
-        (previous === nothing ? 0.0 : previous.preparation_seconds)
+    preparation_seconds = (time_ns() - preparation_start) / 1e9
     save_checkpoint = function(state)
         saved = (; state, configuration, split, preparation_seconds)
         JLD2.jldsave(checkpoint_path * ".tmp"; saved)
@@ -107,7 +101,7 @@ function fit_run(pretrained_model, dataset, split, configuration, directory; sav
         optimizer=Adam(configuration.optimizer.learning_rate,
             configuration.optimizer.betas, configuration.optimizer.epsilon),
         rng=MersenneTwister(split.seed + configuration.optimizer_seed_offset),
-        resume=previous === nothing ? nothing : previous.state, checkpoint=save_checkpoint)
+        checkpoint=save_checkpoint)
     save_final && save_model(joinpath(directory, "final_model.bson"), state.model)
     restore_trainable_parameters!(state.model, state.best_parameters)
     save_model(joinpath(directory, "best_model.bson"), state.model)

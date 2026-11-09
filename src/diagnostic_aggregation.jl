@@ -1,33 +1,59 @@
 # Included inside ExperimentDiagnostics.
 
-"""Collect retained interval TSV diagnostics with run metadata and measured training time."""
+"""
+Collect saved interval diagnostics and attach run metadata.
+
+Args:
+    runs: Records with a directory and optional metadata fields identifying experimental conditions.
+    output_path: Optional destination TSV filepath.
+
+Returns:
+    Interval records with condition metadata, fold, repeat, directory, and training time [s].
+    Training time is missing when absent from the saved result.
+"""
 function collect_run_diagnostics(runs; output_path=nothing)
     records = NamedTuple[]
     for run in runs
+        # Read split membership and measured training cost from the saved fit.
         saved = JLD2.load(joinpath(run.directory, "result.jld2"), "result")
         metadata = get(run, :metadata, NamedTuple())
+        # Each diagnostic row identifies a model, test event, and forecast interval.
         for row in Surge.load_table(joinpath(run.directory, "diagnostics", "metrics.tsv"))
             push!(records, (; metadata..., fold=saved.split.fold, repeat=saved.split.repeat,
                 directory=run.directory, training_seconds=get(saved, :training_seconds, missing), row...))
         end
     end
+    # Return records in memory whether or not an output table is requested.
     isnothing(output_path) || Surge.save_table(output_path, records)
     return records
 end
 
-"""Average repeats within each event, keeping scientific conditions and intervals separate."""
+"""
+Average repeated fits separately for each test event and experimental condition.
+
+Args:
+    records: Interval diagnostic records with fold/repeat identifiers.
+    group_by: Fields identifying a condition, model, forecast interval, and event; exclude repeat.
+
+Returns:
+    Per-event records with equal-repeat averages, repeat counts, and finite-rollout flags.
+    Bias and amplitude RMS values are squared before averaging.
+"""
 function average_event_errors(records; group_by)
     fields = Tuple(group_by)
     groups = Dict{Any, Vector{NamedTuple}}()
     for row in records
+        # Only records with identical grouping fields contribute to the same event average.
         key = NamedTuple{fields}(Tuple(getproperty(row, field) for field in fields))
         push!(get!(groups, key, NamedTuple[]), row)
     end
     events = NamedTuple[]
     for (key, rows) in groups
+        # Repeats may differ, but an event must occur once per fit and belong to one test fold.
         length(unique((row.fold, row.repeat) for row in rows)) == length(rows) ||
             error("Duplicate event/repeat: $key")
         length(unique(row.fold for row in rows)) == 1 || error("Event appears in multiple test folds: $key")
+        # Average squared quantities, not RMS values, to retain the correct error weighting.
         push!(events, (; key..., repeats=length(rows),
             finite_rollout=all(row -> get(row, :finite_rollout, true), rows),
             mse_h=mean(row.mse_h for row in rows), mse_u=mean(row.mse_u for row in rows),
@@ -42,23 +68,40 @@ function average_event_errors(records; group_by)
     return events
 end
 
-"""Average event MSEs equally; training cost averages distinct fits, with zero for pretrained models."""
+"""
+Summarize repeated-run diagnostics with equal weight for each test event.
+
+Args:
+    records: Interval diagnostics with event, fold, repeat, and optional training_seconds fields.
+    group_by: Condition, model, and interval fields; include model and exclude event/fold/repeat.
+    output_path: Optional destination TSV filepath.
+
+Returns:
+    Group summaries with event/fit counts, MSE/RMSE, bias, amplitude, volume drift [m^3],
+    and mean training cost [s]. Pretrained cost is zero; unavailable fitted costs remain missing.
+"""
 function summarize_run_diagnostics(records; group_by, output_path=nothing)
     fields = Tuple(group_by)
+    # Average repeats first so events with more repeats do not receive extra weight.
     events = average_event_errors(records; group_by=(fields..., :event))
     groups = Dict{Any, Vector{NamedTuple}}()
     for event in events
+        # Remove event identity from the key to combine events within each condition/interval.
         key = NamedTuple{fields}(Tuple(getproperty(event, field) for field in fields))
         push!(get!(groups, key, NamedTuple[]), event)
     end
     summaries = NamedTuple[]
+    # Sort group keys for reproducible output order.
     for key in sort!(collect(keys(groups)); by=repr)
         rows = groups[key]
+        # Count each fit's training time once, even when it evaluated several test events.
         fits = Dict((row.fold, row.repeat) => get(row, :training_seconds, missing) for row in records
             if all(getproperty(row, field) == getproperty(key, field) for field in fields))
         average = field -> mean(getproperty(row, field) for row in rows)
+        # The pretrained baseline has no adaptation cost; do not invent missing timings.
         training_seconds = key.model == :pretrained ? 0.0 :
             any(ismissing, values(fits)) ? missing : mean(collect(values(fits)))
+        # Give events equal weight and take square roots only after averaging squared errors.
         push!(summaries, (; key..., events=length(rows), fits=length(fits),
             repeats_min=minimum(row.repeats for row in rows), repeats_max=maximum(row.repeats for row in rows),
             mse_h=average(:mse_h), mse_u=average(:mse_u),

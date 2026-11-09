@@ -27,7 +27,7 @@ function main()
     configuration = results[:full].configuration
     split = results[:full].split
     dataset = Surge.load_burgers_ensemble(basename(dataset_file);
-        data_path=dirname(dataset_file), relative_times=true)
+        data_path=dirname(dataset_file))
     training_data, validation_data = Surge.prepare_training_split(dataset, split, configuration)
     pretrained_model = Surge.load_model(pretrained_file)
     normalizers = Surge.compute_pretrained_error_scales(pretrained_model, training_data,

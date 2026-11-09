@@ -14,11 +14,6 @@ function pretrain(model, training, validation, directory; specification)
         return (model=Surge.load_model(best_path), result=result, path=best_path)
     end
     checkpoint_path = joinpath(directory, "checkpoint.jld2")
-    saved = isfile(checkpoint_path) ? JLD2.load(checkpoint_path, "saved") : nothing
-    if saved !== nothing
-        isequal(saved.specification, specification) || error("Checkpoint settings differ: $directory")
-    end
-    resume = saved === nothing ? nothing : saved.state
     checkpoint = function(state)
         JLD2.jldsave(checkpoint_path * ".tmp"; saved=(; state, specification))
         mv(checkpoint_path * ".tmp", checkpoint_path; force=true)
@@ -26,7 +21,7 @@ function pretrain(model, training, validation, directory; specification)
         println("Pretraining epoch $(state.epoch)/$(settings.epochs), validation MSE = $(state.best_loss)")
         flush(stdout)
     end
-    state = Surge.train_model!(model, training, validation; settings, resume, checkpoint)
+    state = Surge.train_model!(model, training, validation; settings, checkpoint)
     Surge.restore_trainable_parameters!(state.model, state.best_parameters)
     Surge.save_model(best_path, state.model)
     result = (history=state.history, best_epoch=state.best_epoch,

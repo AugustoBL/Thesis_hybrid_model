@@ -43,7 +43,7 @@ function configuration(case, temporal)
 end
 
 function main()
-    dataset = Surge.load_burgers_ensemble("uniform.jld2"; data_path=data_directory, relative_times=true)
+    dataset = Surge.load_burgers_ensemble("uniform.jld2"; data_path=data_directory)
     pretrained_model = Surge.load_model(pretrained_file)
     event_splits = Surge.make_event_splits(18;
         fold_count=5, folds=1:5, repeats=1:3,

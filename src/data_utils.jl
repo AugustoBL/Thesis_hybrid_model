@@ -1,40 +1,26 @@
-"""
-Locate the repository data directory.
-
-Args:
-    None.
-
-Returns:
-    Path to the Data directory.
-"""
+"""Return the repository Data directory path."""
 get_data_path() = joinpath(@__DIR__, "..", "Data")
-"""
-Locate the repository model directory.
 
-Args:
-    None.
-
-Returns:
-    Path to the Trained_models directory.
-"""
+"""Return the repository Trained_models directory path."""
 get_model_path() = joinpath(@__DIR__, "..", "Trained_models")
 
 """
-Load a saved ensemble and omit the initial timestamp.
+Load an ensemble.
 
 Args:
     filename: Ensemble filename.
     data_path: Directory containing the ensemble.
 
 Returns:
-    Named tuple containing solution, grid, prediction times in seconds, and params.
+    Named tuple containing solution (including initial states), grid, params,
+    and elapsed times [s].
 """
-function load_burgers_ensemble(filename::String; data_path=get_data_path(), relative_times=false)
+function load_burgers_ensemble(filename::String; data_path=get_data_path())
     data = load(joinpath(data_path, filename))
     return (
         solution=data["solution"],
         grid=data["grid"],
-        times=relative_times ? Float64.(data["times"][2:end]) .- Float64(first(data["times"])) : data["times"][2:end],
+        times=Float64.(data["times"][2:end]) .- Float64(first(data["times"])),
         params=data["params"],
     )
 end
@@ -53,11 +39,15 @@ function _model_input(state, params)
     n_water_level_points = length(state.h)
     n_velocity_points = length(state.u)
     input = zeros(Float32, n_velocity_points, 5)
+    # Water level
     input[1:n_water_level_points, 1] .= state.h
+    # Velocity
     input[:, 2] .= state.u
-    # Depth normalization
+    # Depth. Match the depth normalization used by the conservative model.
     input[:, 3] .= params.D ./ 30f0
+    # Wind stress
     input[:, 4] .= state.tau
+    # Boundary indicators
     input[1, 5] = 1f0
     input[end, 5] = 1f0
     return input
@@ -70,13 +60,15 @@ Args:
     state: State containing water levels h [m] and face velocities u [m/s].
 
 Returns:
-    Float32 array `(N + 1, 2)` with a padded final water-level row.
+    Float32 `(N + 1, 2)` array: cell h [m] with a zero final row, then face u [m/s].
 """
 function _model_target(state)
     n_water_level_points = length(state.h)
     n_velocity_points = length(state.u)
     target = zeros(Float32, n_velocity_points, 2)
+    # Water levels
     target[1:n_water_level_points, 1] .= state.h
+    # Velocities
     target[:, 2] .= state.u
     return target
 end
@@ -85,10 +77,10 @@ end
 Store initial states, forcing, and sparse observation targets.
 
 Args:
-    initial_input: Initial features `(space, 5, events)`.
+    initial_input: Initial features `(space, 5, events)`: padded h, u, depth/30, stress, boundary indicator.
     forcing: Depth/30, stress, and boundary features `(space, 3, steps, events)`.
-    target: Observed h/u values `(space, 2, steps, events)`; unobserved entries are placeholders.
-    observation_mask: Array matching target, with ones at observed entries.
+    target: Observed h [m] and u [m/s] `(space, 2, steps, events)`; unobserved entries are placeholders.
+    observation_mask: Array matching target; 1 marks an observation, 0 a placeholder.
     measurement_gap: Number of model steps between observations.
 
 Returns:
@@ -102,19 +94,13 @@ struct SparseStationEventDataset{TI, TF, TT, TM}
     measurement_gap::Int
 end
 
-"""
-Count the events in a sparse dataset.
-
-Args:
-    dataset: Sparse event dataset.
-
-Returns:
-    Number of events.
-"""
+"""Return the event count."""
 Base.length(dataset::SparseStationEventDataset) = size(dataset.initial_input, 3)
 
 """
-Resolve observation indices for each state channel.
+Resolve observation indices for each state channel. If the channel have seperate observations indices,
+those are found in grid_indices_by_channel. If certain channels share observation locations this function is used
+to assign them to all of those channels. 
 
 Args:
     n_channels: Number of state channels.
@@ -123,7 +109,8 @@ Args:
     grid_indices_by_channel: Optional per-channel indices overriding the shared specification.
 
 Returns:
-    Per-channel collections of spatial indices.
+    Per-channel spatial indices. Explicit per-channel indices are returned unchanged;
+    otherwise, unselected channels or missing shared indices produce empty vectors.
 """
 function _resolve_grid_indices_by_channel(
     n_channels::Int;
@@ -132,11 +119,20 @@ function _resolve_grid_indices_by_channel(
     grid_indices_by_channel=nothing,
 )
     if grid_indices_by_channel === nothing
-        return [
-            channel in channels && shared_grid_indices !== nothing ?
-                shared_grid_indices : Int[]
-            for channel in 1:n_channels
-        ]
+        indices_by_channel = Vector{Int}[]
+
+        for channel in 1:n_channels
+            channel_is_selected = channel in channels
+            shared_indices_are_available = shared_grid_indices !== nothing
+
+            if channel_is_selected && shared_indices_are_available
+                push!(indices_by_channel, shared_grid_indices)
+            else
+                push!(indices_by_channel, Int[])
+            end
+        end
+
+        return indices_by_channel
     end
     return grid_indices_by_channel
 end
@@ -154,7 +150,9 @@ Args:
     max_steps: Optional maximum number of transitions to retain.
 
 Returns:
-    SparseStationEventDataset with Float32 arrays and complete initial states.
+    Float32 dataset with complete initial inputs `(space, 5, events)`, forcing
+    `(space, 3, steps, events)`, and targets/mask `(space, 2, steps, events)`.
+    Only selected locations at measurement steps have nonzero masks.
 """
 function prepare_sparse_station_event_data(
     events,
@@ -180,33 +178,33 @@ function prepare_sparse_station_event_data(
     )
 
     initial_input = zeros(Float32, n_grid_points, 5, n_events)
-    # Separate known inputs from state targets; wind may change every step
-    # even though observations arrive only at the measurement interval.
+    # Forcing is needed every step, even between sparse observations.
     forcing = zeros(Float32, n_grid_points, 3, n_steps, n_events)
     target = zeros(Float32, n_grid_points, 2, n_steps, n_events)
     observation_mask = zeros(Float32, size(target))
 
     for event_index in eachindex(events)
         event = events[event_index]
+        # Set initial state
         initial_input[:, :, event_index] .=
             _model_input(first(event), params)
-
+        # For each following timestep
         for step in 1:n_steps
             model_input = _model_input(event[step], params)
             forcing[:, :, step, event_index] .= model_input[:, 3:5]
-            # Retain forcing for every transition but populate supervision only
-            # at observation times; omitted targets and their masks remain zero.
+            # Unobserved targets and masks remain zero. If a observation is available
             step % measurement_gap == 0 || continue
 
-            # The kth forcing slice advances to the (k+1)th stored state.
+            # Define the full target state of this observation
             full_target = _model_target(event[step + 1])
             for channel in axes(target, 2)
+                # Select locations where the observations should be available
                 channel_grid_indices = observation_grid_indices[channel]
                 isempty(channel_grid_indices) && continue
+                # Add them to the target
                 target[channel_grid_indices, channel, step, event_index] .=
                     full_target[channel_grid_indices, channel]
-                # Record availability independently of the value, since a true observation
-                # can itself equal zero.
+                # Add the locations to the observation mask
                 observation_mask[channel_grid_indices, channel, step, event_index] .= 1f0
             end
         end
@@ -230,7 +228,7 @@ Args:
     rng: Random generator for observation noise.
 
 Returns:
-    Dataset with copied noisy targets and unchanged initial states, forcing, and mask.
+    Dataset with copied noisy targets; initial states, forcing, and mask are shared unchanged.
 """
 function add_observation_noise(
     dataset::SparseStationEventDataset,
@@ -243,8 +241,7 @@ function add_observation_noise(
         noise_std == 0 && continue
         channel_mask = view(dataset.observation_mask, :, channel, :, :)
         channel_target = view(noisy_target, :, channel, :, :)
-        # Draw in the channel shape and mask afterwards; unobserved placeholders
-        # remain unchanged and each observed time/location/event gets its own noise.
+        # Independent noise per location/time/event
         channel_target .+= noise_std .* randn(rng, Float32, size(channel_target)) .* channel_mask
     end
     return SparseStationEventDataset(
@@ -257,7 +254,7 @@ function add_observation_noise(
 end
 
 """
-Build reproducible event-level training, validation, and test splits.
+Build training, validation, and test splits.
 
 Args:
     event_count: Total number of events.
@@ -274,16 +271,30 @@ Returns:
 """
 function make_event_splits(event_count; fold_count, folds, repeats, training_event_count,
                            validation_event_count, selection_seed, training_seed)
-    # Integer partition boundaries allocate all events even when the event
-    # count is not divisible by the number of folds.
-    test_blocks = [collect(fld((fold - 1) * event_count, fold_count) + 1:
-        fld(fold * event_count, fold_count)) for fold in 1:fold_count]
+    # Include every event even when fold sizes differ.
+    test_blocks = Vector{Int}[]
+
+    for fold in 1:fold_count
+        # Find the first and last event indices in this fold
+        first_event = fld((fold - 1) * event_count, fold_count) + 1
+        last_event = fld(fold * event_count, fold_count)
+
+        # Store this fold's event indices
+        event_indices = collect(first_event:last_event)
+        push!(test_blocks, event_indices)
+    end
     splits = NamedTuple[]
     for fold in folds
-        remaining_events = vcat([test_blocks[mod1(fold + offset, fold_count)]
-            for offset in 1:fold_count-1]...)
-        # Keep validation deterministic within a fold; only the training subset
-        # changes between repeats.
+        remaining_events = Int[]
+
+        for offset in 1:(fold_count - 1)
+            # Move through the other folds, wrapping back to fold 1
+            other_fold = mod1(fold + offset, fold_count)
+
+            # Add this fold's events to the combined list
+            append!(remaining_events, test_blocks[other_fold])
+        end
+        # Validation is fixed within a fold and training subsets vary between repeats.
         validation_events = remaining_events[1:validation_event_count]
         # Exclude both held-out groups before sampling to prevent event leakage.
         training_pool = sort(setdiff(1:event_count, vcat(test_blocks[fold], validation_events)))
@@ -298,7 +309,17 @@ function make_event_splits(event_count; fold_count, folds, repeats, training_eve
     return splits
 end
 
-"""Encode consecutive event states as supervised one-step input/target arrays."""
+"""
+Encode  one-step training pairs.
+
+Args:
+    dataset: Ensemble containing solution, face grid, and physical params.
+    indices: Event indices to include, in sample order.
+
+Returns:
+    Float32 input `(space, 5, samples)` and target `(space, 2, samples)` arrays.
+    Each sample maps one state's features to the next state's padded h and face u.
+"""
 function one_step_pairs(dataset, indices)
     count = sum(length(dataset.solution[i]) - 1 for i in indices)
     faces = length(dataset.grid.u)
@@ -307,6 +328,7 @@ function one_step_pairs(dataset, indices)
     sample = 0
     for event_index in indices
         event = dataset.solution[event_index]
+        # Keep transitions within each event; never pair states across events.
         for step in 1:length(event)-1
             sample += 1
             inputs[:, :, sample] .= _model_input(event[step], dataset.params)

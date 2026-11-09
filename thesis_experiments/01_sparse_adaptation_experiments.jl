@@ -105,7 +105,7 @@ function main()
     datasets = Dict{Symbol, Any}()
     for profile in (:uniform, :interior, :boundary)
         dataset = Surge.load_burgers_ensemble(basename(joinpath(data_directory, "$profile.jld2"));
-            data_path=dirname(joinpath(data_directory, "$profile.jld2")), relative_times=true)
+            data_path=dirname(joinpath(data_directory, "$profile.jld2")))
         datasets[profile] = dataset
     end
     event_splits = Surge.make_event_splits(18;

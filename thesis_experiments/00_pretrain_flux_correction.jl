@@ -16,7 +16,7 @@ include(joinpath(@__DIR__, "experiment_dependencies.jl"))
 
 function main()
     source_dataset = Surge.load_burgers_ensemble(basename(source_file);
-        data_path=dirname(source_file), relative_times=true)
+        data_path=dirname(source_file))
     time_step = first(source_dataset.times)
 
     training_pairs = Surge.one_step_pairs(source_dataset, source_training_events)

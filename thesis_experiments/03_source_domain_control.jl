@@ -27,9 +27,9 @@ include(joinpath(@__DIR__, "experiment_dependencies.jl"))
 function main()
     pretrained_model = Surge.load_model(pretrained_file)
     source_dataset = Surge.load_burgers_ensemble(basename(configuration.dataset_file);
-        data_path=dirname(configuration.dataset_file), relative_times=true)
+        data_path=dirname(configuration.dataset_file))
     target_dataset = Surge.load_burgers_ensemble(basename(joinpath(data_directory, "uniform.jld2"));
-        data_path=dirname(joinpath(data_directory, "uniform.jld2")), relative_times=true)
+        data_path=dirname(joinpath(data_directory, "uniform.jld2")))
     event_splits = Surge.make_event_splits(18;
         fold_count=5, folds=collect(1:5), repeats=collect(1:3),
         training_event_count=2, validation_event_count=4,

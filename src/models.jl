@@ -3,8 +3,8 @@
 Wrap a CNN that predicts increments to the state channels.
 
 Args:
-    f: CNN producing state increments `(space, n_state_channels, batch)`.
-    n_state_channels: Number of leading input channels advanced by the model.
+    f: CNN predicting state increments.
+    n_state_channels: Number of input channels advanced by the model.
 
 Returns:
     ResidualBlock holding the supplied CNN.
@@ -31,154 +31,14 @@ end
 Flux.@layer ResidualBlock
 
 """
-Access the CNN stored in a model wrapper.
-
-Args:
-    model: Wrapper containing the f network field.
-
-Returns:
-    The stored CNN without copying.
-"""
-network(model) = model.f
-
-"""
-Replace the CNN while preserving residual-wrapper settings.
-
-Args:
-    model: Original residual wrapper.
-    cnn: Replacement CNN.
-
-Returns:
-    ResidualBlock with the supplied CNN.
-"""
-with_network(model::ResidualBlock, cnn) = ResidualBlock(cnn, model.n_state_channels)
-
-
-"""
-Combine learned velocity increments with conservative water-level updates.
-
-Args:
-    f: CNN predicting velocity increments and optional flux corrections.
-    dt: Model timestep [s].
-    dx: Cell spacing [m].
-    depth_scale: Depth normalization scale [m].
-    mode: Either :velocity_only or :flux_correction.
-
-Returns:
-    ConservativeVelocityModel holding fixed physical settings and a trainable CNN.
-"""
-struct ConservativeVelocityModel{C,T}
-    f::C
-    dt::T
-    dx::T
-    depth_scale::T
-    mode::Symbol
-end
-Flux.@layer ConservativeVelocityModel trainable=(f,)
-
-"""
-Replace the CNN while preserving conservative-model settings.
-
-Args:
-    model: Original conservative wrapper.
-    cnn: Replacement CNN.
-
-Returns:
-    ConservativeVelocityModel with unchanged timestep, grid spacing, depth scale, and mode.
-"""
-with_network(model::ConservativeVelocityModel, cnn) =
-    ConservativeVelocityModel(cnn, model.dt, model.dx, model.depth_scale, model.mode)
-
-"""
-Advance water level and velocity with zero boundary flux.
-
-Args:
-    model: Conservative wrapper with timestep and grid spacing.
-    input: Features `(N + 1, 5, batch)`: padded h, u, depth/scale, stress, and boundary indicator.
-
-Returns:
-    State `(N + 1, 2, batch)` with padded h [m] and face u [m/s].
-"""
-function (model::ConservativeVelocityModel)(input)
-    # The CNN outputs a velocity increment and, in flux mode, an independent
-    # correction to the transport flux.
-    learned = model.f(input)
-    # In case of :velocity_only there is one state channel for :flux_correction there is two
-    expected_channels = model.mode == :velocity_only ? 1 : 2
-    # Discard the padded water-level entry.
-    h = input[1:end-1, 1:1, :]
-    # Construct boundary entry.
-    boundary = zero.(input[1:1, 2:2, :])
-    # Update only interior face velocities
-    u = cat(boundary, input[2:end-1, 2:2, :] .+ learned[2:end-1, 1:1, :], boundary; dims=1)
-    # Interpolate cell-centred waterlevels to the faces
-    h_face = cat(h[1:1, :, :], (h[1:end-1, :, :] .+ h[2:end, :, :]) ./ 2,
-        h[end:end, :, :]; dims=1)
-    # Undo the depth normalization and add the current water-levels.
-    depth = model.depth_scale .* input[:, 3:3, :] .+ h_face
-    interior_flux = depth[2:end-1, :, :] .* u[2:end-1, :, :]
-    if model.mode == :flux_correction
-        # The extra learned transport can compensate velocity errors.
-        interior_flux = interior_flux .+ learned[2:end-1, 2:2, :]
-    end
-    flux = cat(boundary, interior_flux, boundary; dims=1)
-    # Calculate the water-levels of the next steps
-    next_h = h .- (model.dt / model.dx) .* (flux[2:end, :, :] .- flux[1:end-1, :, :])
-    # Restore a dummy final h row, then stack h and u as the two state channels.
-    return cat(cat(next_h, boundary; dims=1), u; dims=2)
-end
-
-"""
-Build a CNN inside a conservative surge wrapper.
-
-Args:
-    n_hidden_channels: Number of channels in hidden convolutions.
-    filter_width: Convolution kernel width in grid points.
-    dt: Model timestep [s].
-    dx: Cell spacing [m].
-    depth_scale: Depth normalization scale [m].
-    mode: Either :velocity_only or :flux_correction.
-    activation: Hidden-layer activation function.
-
-Returns:
-    ConservativeVelocityModel; the optional flux-correction output starts at zero.
-"""
-function build_conservative_velocity_cnn(n_hidden_channels::Int, filter_width::Int;
-    dt, dx, depth_scale=30f0, mode=:velocity_only, activation=swish)
-    channels = mode == :velocity_only ? 1 : 2
-    cnn = build_base_cnn(5, channels, n_hidden_channels, filter_width, 2;
-        activation=activation, pad=filter_width ÷ 2).f
-    if mode == :flux_correction
-        # Start the added transport at zero
-        cnn.layers[end].weight[:, :, 2] .= 0
-        cnn.layers[end].bias[2] = 0
-    end
-    return ConservativeVelocityModel(cnn, Float32(dt), Float32(dx), Float32(depth_scale), mode)
-end
-
-"""
-Build a conservative CNN with a learned flux correction.
-
-Args:
-    n_hidden_channels: Number of hidden channels.
-    filter_width: Convolution kernel width in grid points.
-    kwargs: Timestep, grid spacing, depth scale, and activation forwarded to the model builder.
-
-Returns:
-    ConservativeVelocityModel in :flux_correction mode.
-"""
-build_flux_correction_cnn(n_hidden_channels::Int, filter_width::Int; kwargs...) =
-    build_conservative_velocity_cnn(n_hidden_channels, filter_width; mode=:flux_correction, kwargs...)
-
-"""
-Build four activated convolutions and a linear output layer.
+Build a five-layer residual CNN.
 
 Args:
     n_input_channels: Number of input feature channels.
     n_output_channels: Number of predicted increment channels.
     n_hidden_channels: Number of hidden channels.
     filter_width: Convolution kernel width in grid points.
-    n_state_channels: Number of leading state channels receiving increments.
+    n_state_channels: Number of state channels receiving increments (h,u normally).
     activation: Hidden-layer activation function.
     pad: Convolution padding in grid points.
 
@@ -206,14 +66,155 @@ function build_base_cnn(
 end
 
 """
-Store a frozen convolution with trainable channel modulation.
+Access the CNN stored in a model wrapper.
 
 Args:
-    frozen_weight: Fixed convolution kernel.
-    frozen_bias: Fixed output-channel biases.
-    scale: Trainable output-channel multipliers.
-    shift: Trainable output-channel offsets.
-    activation: Activation applied after modulation.
+    model: Wrapper containing the f network field.
+
+Returns:
+    The stored CNN without copying.
+"""
+network(model) = model.f
+
+"""
+Replace the CNN.
+
+Args:
+    model: Original residual wrapper.
+    cnn: Replacement CNN.
+
+Returns:
+    ResidualBlock with the supplied CNN.
+"""
+with_network(model::ResidualBlock, cnn) = ResidualBlock(cnn, model.n_state_channels)
+
+
+"""
+Combine learned velocity increments with water-level updates.
+
+Args:
+    f: CNN predicting velocity increments and flux corrections.
+    dt: Model timestep [s].
+    dx: Cell spacing [m].
+    depth_scale: Depth normalization scale [m].
+    mode: :velocity_only or :flux_correction (adds a learned transport correction).
+
+Returns:
+    ConservativeVelocityModel.
+"""
+struct ConservativeVelocityModel{C,T}
+    f::C
+    dt::T
+    dx::T
+    depth_scale::T
+    mode::Symbol
+end
+Flux.@layer ConservativeVelocityModel trainable=(f,)
+
+
+"""
+Replace the CNN in the wrapper.
+
+Args:
+    model: Original conservative wrapper.
+    cnn: Replacement CNN.
+
+Returns:
+    ConservativeVelocityModel.
+"""
+with_network(model::ConservativeVelocityModel, cnn) =
+    ConservativeVelocityModel(cnn, model.dt, model.dx, model.depth_scale, model.mode)
+
+"""
+Advance water level and velocity with zero boundary flux.
+
+Args:
+    model: Conservative wrapper.
+    input: Features `(N + 1, 5, batch)`: padded h [m], face u [m/s], depth/depth_scale, wind stress, and boundary indicator.
+
+Returns:
+    State `(N + 1, 2, batch)` with padded h [m] and face u [m/s].
+"""
+function (model::ConservativeVelocityModel)(input)
+    # The CNN predicts velocity increments and, optionally, transport corrections.
+    learned = model.f(input)
+    # Discard the padded water-level entry.
+    h = input[1:end-1, 1:1, :]
+    # Construct boundary entry.
+    boundary = zero.(input[1:1, 2:2, :])
+    # Update only interior face velocities
+    u = cat(boundary, input[2:end-1, 2:2, :] .+ learned[2:end-1, 1:1, :], boundary; dims=1)
+    # Interpolate cell-centred waterlevels to the faces
+    h_face = cat(h[1:1, :, :], (h[1:end-1, :, :] .+ h[2:end, :, :]) ./ 2,
+        h[end:end, :, :]; dims=1)
+    # Undo the depth normalization present in the data and add the current water-levels.
+    depth = model.depth_scale .* input[:, 3:3, :] .+ h_face
+    interior_flux = depth[2:end-1, :, :] .* u[2:end-1, :, :]
+    if model.mode == :flux_correction
+        # The extra learned flux term can compensate velocity errors.
+        interior_flux = interior_flux .+ learned[2:end-1, 2:2, :]
+    end
+    flux = cat(boundary, interior_flux, boundary; dims=1)
+    # Calculate the water-levels of the next steps
+    next_h = h .- (model.dt / model.dx) .* (flux[2:end, :, :] .- flux[1:end-1, :, :])
+    # Restore a padded final h row, then stack h and u as the two state channels.
+    return cat(cat(next_h, boundary; dims=1), u; dims=2)
+end
+
+"""
+Build a conservative CNN with optional flux correction.
+
+Args:
+    n_hidden_channels: Number of channels.
+    filter_width: Convolution kernel width.
+    dt: Model timestep [s].
+    dx: Cell spacing [m].
+    depth_scale: Depth normalization scale [m] found in the data.
+    mode: Either :velocity_only or :flux_correction.
+    activation: Hidden-layer activation function.
+
+Returns:
+    ConservativeVelocityModel.
+"""
+function build_conservative_velocity_cnn(n_hidden_channels::Int, filter_width::Int;
+    dt, dx, depth_scale=30f0, mode=:velocity_only, activation=swish)
+    mode in (:velocity_only, :flux_correction) || throw(ArgumentError("Unsupported conservative mode: $mode"))
+    isodd(filter_width) || throw(ArgumentError("filter_width must be odd to preserve spatial length"))
+    channels = mode == :velocity_only ? 1 : 2
+    cnn = build_base_cnn(5, channels, n_hidden_channels, filter_width, 2;
+        activation=activation, pad=filter_width ÷ 2).f
+    if mode == :flux_correction
+        # Start the added flux at zero
+        cnn.layers[end].weight[:, :, 2] .= 0
+        cnn.layers[end].bias[2] = 0
+    end
+    return ConservativeVelocityModel(cnn, Float32(dt), Float32(dx), Float32(depth_scale), mode)
+end
+
+"""
+Build a conservative CNN with a learned flux correction.
+
+Args:
+    n_hidden_channels: Number of hidden channels.
+    filter_width: Convolution kernel width in grid points.
+    kwargs: Timestep, grid spacing, depth scale, and activation forwarded to the conservative builder.
+
+Returns:
+    ConservativeVelocityModel in :flux_correction mode.
+"""
+build_flux_correction_cnn(n_hidden_channels::Int, filter_width::Int; kwargs...) =
+    build_conservative_velocity_cnn(n_hidden_channels, filter_width; mode=:flux_correction, kwargs...)
+
+
+"""
+Store a frozen convolution with trainable per-channel scale and shift.
+
+Args:
+    frozen_weight: Fixed kernel `(kernel_width, input_channels, output_channels)`.
+    frozen_bias: Fixed vector with one bias per output channel.
+    scale: Trainable vector with one value per output channel.
+    shift: Trainable vector with one value per output channel.
+    activation: Activation function applied after modulation.
     pad: Convolution padding.
 
 Returns:
@@ -231,13 +232,13 @@ end
 Flux.@layer FilmConv trainable=(scale, shift)
 
 """
-Wrap a convolution with identity-initialized FiLM modulation.
+Wrap a convolution with FiLM modulation.
 
 Args:
-    conv: Base convolution supplying kernel, bias, activation, and padding.
+    conv: Base convolution.
 
 Returns:
-    FilmConv with unit scales and zero shifts.
+    FilmConv with unit scales and zero shifts; base arrays are shared with conv.
 """
 function FilmConv(conv::Conv)
     n_output_channels = size(conv.weight, 3)
@@ -270,6 +271,7 @@ function (layer::FilmConv)(input)
         layer.frozen_bias
     end
     output = Flux.conv(input, weight; pad=layer.pad)
+    # Shape (1, output_channels, 1) broadcasts across space and batch.
     output = output .+ reshape(bias, 1, :, 1)
     output = reshape(layer.scale, 1, :, 1) .* output .+
         reshape(layer.shift, 1, :, 1)
@@ -283,7 +285,7 @@ Args:
     base_model: Pretrained model to adapt.
 
 Returns:
-    Independent model retaining its wrapper and initial predictions.
+    Independent model containing the FiLM adaptation.
 """
 function build_FiLM(base_model)
     adapted_layers = (FilmConv(deepcopy(layer)) for layer in network(base_model).layers)
@@ -295,7 +297,7 @@ Store a frozen kernel with trainable bias and low-rank factors.
 
 Args:
     frozen_weight: Fixed kernel `(kernel_width, input_channels, output_channels)`.
-    bias: Trainable output-channel biases.
+    bias: Trainable biases.
     left_matrix: Trainable factor `(rank, output_channels)`.
     right_matrix: Trainable factor `(kernel_width, input_channels, rank)`.
     activation: Convolution activation function.
@@ -316,7 +318,7 @@ end
 Flux.@layer BiasLoRAConv trainable=(bias, left_matrix, right_matrix)
 
 """
-Initialize bias-inclusive low-rank convolutional adaptation.
+Initialize low-rank adaptation with bias adaptation.
 
 Args:
     convolution: Pretrained convolution to copy.
@@ -324,26 +326,27 @@ Args:
     rng: Random generator for factor initialization.
 
 Returns:
-    BiasLoRAConv with zero initial kernel update; rank zero gives bias-only adaptation.
+    BiasLoRAConv
 """
 function BiasLoRAConv(convolution::Conv, rank::Int; rng=Random.default_rng())
+    rank >= 0 || throw(ArgumentError("LoRA rank must be nonnegative"))
     kernel_width, input_channels, output_channels = size(convolution.weight)
     left_matrix = zeros(Float32, rank, output_channels)
+    # If rank is zero we only adapt the bias
     if rank > 0
         left_matrix .= randn(rng, Float32, rank, output_channels) .* Float32(sqrt(2 / rank))
     end
-    # A zero factor preserves the pretrained kernel initially and the random
-    # other factor permits a nonzero gradient into this factor on the first update.
+    # Zero right factors preserve the base kernel; random left factors enable initial right-factor gradients.
     right_matrix = zeros(Float32, kernel_width, input_channels, rank)
     return BiasLoRAConv(copy(convolution.weight), copy(convolution.bias),
         left_matrix, right_matrix, convolution.σ, convolution.pad)
 end
 
 """
-Apply the base kernel and its low-rank update.
+Materialize and apply the LoRA kernel; use effective_model to reuse it across rollout steps.
 
 Args:
-    layer: Bias-inclusive LoRA convolution.
+    layer: LoRA convolution.
     input: Input tensor `(space, input_channels, batch)`.
 
 Returns:
@@ -362,28 +365,121 @@ Args:
     rng: Random generator for factor initialization.
 
 Returns:
-    Adapted model retaining its wrapper and copied base kernels.
+    Adapted model.
 """
 function build_LoRA(base_model, ranks::AbstractVector; rng=Random.default_rng())
-    @assert length(ranks) == length(network(base_model).layers)
+    @assert length(ranks) == length(network(base_model).layers) "Supply one LoRA rank per convolution"
     layers = [BiasLoRAConv(layer, Int(rank); rng=rng)
         for (layer, rank) in zip(network(base_model).layers, ranks)]
     return with_network(base_model, Chain(layers...))
 end
 
+
 """
-Count scalar trainable parameters.
+Store a materialized LoRA kernel for reuse within a rollout, retaining factor gradients.
 
 Args:
-    model: Model whose trainable arrays are counted.
+    weight: Effective kernel `(kernel_width, input_channels, output_channels)`.
+    bias: Output-channel bias vector.
+    activation: Convolution activation function.
+    pad: Convolution padding.
 
 Returns:
-    Total number of scalar entries in Flux.trainables(model).
+    EffectiveConv retaining the supplied arrays and activation.
 """
-trainable_parameter_count(model) = sum(length, Flux.trainables(model))
+struct EffectiveConv{Weight,Bias,Activation,Padding}
+    weight::Weight
+    bias::Bias
+    activation::Activation
+    pad::Padding
+end
+Flux.@layer EffectiveConv
 
 """
-Store convolution parameters excluded from optimizer updates.
+Apply the materialized kernel, bias, and activation.
+
+Args:
+    layer: Effective convolution.
+    input: Input tensor `(space, input_channels, batch)`.
+
+Returns:
+    Output tensor `(space, output_channels, batch)`.
+"""
+function (layer::EffectiveConv)(input)
+    output = Flux.conv(input, layer.weight; pad=layer.pad) .+ reshape(layer.bias, 1, :, 1)
+    return layer.activation.(output)
+end
+
+"""
+Materialize a LoRA kernel while retaining factor gradients.
+
+Args:
+    layer: Bias LoRA convolution.
+
+Returns:
+    EffectiveConv with the base kernel plus its low-rank update.
+"""
+function effective_layer(layer::BiasLoRAConv)
+    kernel_width, input_channels, output_channels = size(layer.frozen_weight)
+    rank = size(layer.left_matrix, 1)
+    frozen_weight = Flux.ignore_derivatives() do
+        layer.frozen_weight
+    end
+    # Factorize the kernel as a (K*Cin)-by-Cout matrix, then restore Flux
+    # convolution axis order.
+    update = reshape(reshape(layer.right_matrix, kernel_width * input_channels, rank) *
+        layer.left_matrix, kernel_width, input_channels, output_channels)
+    return EffectiveConv(frozen_weight .+ update, layer.bias, layer.activation, layer.pad)
+end
+
+"""
+Materialize LoRA kernels once for a rollout; rebuild after parameter updates.
+
+Args:
+    model: Residual or conservative model wrapper.
+
+Returns:
+    Wrapper with effective LoRA layers, or the original model when none exist.
+"""
+function effective_model(model::Union{ResidualBlock,ConservativeVelocityModel})
+    if any(layer -> layer isa BiasLoRAConv, network(model).layers)
+        original_network = network(model)
+
+        effective_layers = map(effective_layer, original_network.layers)
+
+        new_network = Chain(effective_layers...)
+
+        new_model = with_network(model, new_network)
+
+        return new_model
+    end
+    return model
+end
+
+"""
+Return a non-LoRA layer unchanged.
+
+Args:
+    layer: Other type of layer
+
+Returns:
+    The original layer.
+"""
+effective_layer(layer) = layer
+
+"""
+Return a model without a supported wrapper unchanged.
+
+Args:
+    model: Model
+
+Returns:
+    The original model.
+"""
+effective_model(model) = model
+
+"""
+Store convolution parameters excluded from optimizer updates. Used for layer freezing.
 
 Args:
     weight: Convolution kernel.
@@ -409,14 +505,14 @@ Args:
     convolution: Base convolution to copy.
 
 Returns:
-    FrozenConv preserving activation and padding.
+    FrozenConv.
 """
 function FrozenConv(convolution::Conv)
     return FrozenConv(copy(convolution.weight), copy(convolution.bias), convolution.σ, convolution.pad)
 end
 
 """
-Apply a frozen convolution while allowing input gradients.
+Apply a frozen convolution.
 
 Args:
     layer: Frozen convolution.
@@ -433,105 +529,12 @@ function (layer::FrozenConv)(input)
     return layer.activation.(output)
 end
 
-"""
-Store a materialized convolution kernel.
-
-Args:
-    weight: Effective convolution kernel.
-    bias: Output-channel biases.
-    activation: Convolution activation function.
-    pad: Convolution padding.
-
-Returns:
-    EffectiveConv retaining the supplied arrays and activation.
-"""
-struct EffectiveConv{Weight,Bias,Activation,Padding}
-    weight::Weight
-    bias::Bias
-    activation::Activation
-    pad::Padding
-end
-Flux.@layer EffectiveConv
-
-"""
-Apply a materialized kernel, bias, and activation.
-
-Args:
-    layer: Effective convolution.
-    input: Input tensor `(space, input_channels, batch)`.
-
-Returns:
-    Output tensor `(space, output_channels, batch)`.
-"""
-function (layer::EffectiveConv)(input) #COPILOT
-    output = Flux.conv(input, layer.weight; pad=layer.pad) .+ reshape(layer.bias, 1, :, 1)
-    return layer.activation.(output)
-end
-
-"""
-Materialize a LoRA kernel while retaining factor gradients.
-
-Args:
-    layer: Bias-inclusive LoRA convolution.
-
-Returns:
-    EffectiveConv with the base kernel plus its low-rank update.
-"""
-function effective_layer(layer::BiasLoRAConv) #COPILOT
-    kernel_width, input_channels, output_channels = size(layer.frozen_weight)
-    rank = size(layer.left_matrix, 1)
-    frozen_weight = Flux.ignore_derivatives() do
-        layer.frozen_weight
-    end
-    # Factorize the kernel as a (K*Cin)-by-Cout matrix, then restore Flux
-    # convolution axis order.
-    update = reshape(reshape(layer.right_matrix, kernel_width * input_channels, rank) *
-        layer.left_matrix, kernel_width, input_channels, output_channels)
-    return EffectiveConv(frozen_weight .+ update, layer.bias, layer.activation, layer.pad)
-end
-
-"""
-Return a non-LoRA layer unchanged.
-
-Args:
-    layer: Layer requiring no kernel materialization.
-
-Returns:
-    The original layer.
-"""
-effective_layer(layer) = layer 
-"""
-Return a model without a supported wrapper unchanged.
-
-Args:
-    model: Model requiring no wrapper-level materialization.
-
-Returns:
-    The original model.
-"""
-effective_model(model) = model 
-
-"""
-Materialize LoRA kernels for one rollout.
-
-Args:
-    model: Residual or conservative model wrapper.
-
-Returns:
-    Wrapper with effective LoRA layers, or the original model when no LoRA layers exist.
-"""
-function effective_model(model::Union{ResidualBlock,ConservativeVelocityModel})
-    if any(layer -> layer isa BiasLoRAConv, network(model).layers)
-        return with_network(model, Chain(map(effective_layer, network(model).layers)...))
-    end
-    return model
-end
 
 """
 Create an adaptation model without modifying the pretrained model.
 
 Args:
-    pretrained_model: Base surrogate to adapt.
+    pretrained_model: Base model wrapper.
     method: Adaptation method: :full, :output, :first_two, :last_two, :film, or :lora.
     seed: Seed for adaptation initialization.
     ranks: Optional layer-wise LoRA ranks.
@@ -540,11 +543,13 @@ Returns:
     Independent model with the requested trainable layers or adaptation factors.
 """
 function configure_adaptation(pretrained_model, method; seed, ranks=nothing)
+    # Non layer freezing methods
     if method == :film
-        return build_FiLM(deepcopy(pretrained_model))
+        return build_FiLM(pretrained_model)
     elseif method == :lora
         return build_LoRA(pretrained_model, ranks; rng=MersenneTwister(seed))
     end
+    # Layer freezing methods including not freezing
     layer_count = length(network(pretrained_model).layers)
     if method == :full
         trainable_layers = collect(1:layer_count)
@@ -552,9 +557,10 @@ function configure_adaptation(pretrained_model, method; seed, ranks=nothing)
         trainable_layers = [layer_count]
     elseif method == :first_two
         trainable_layers = [1, 2]
-    else
-        @assert method == :last_two
+    elseif method == :last_two
         trainable_layers = [layer_count - 1, layer_count]
+    else
+        throw(ArgumentError("Unsupported adaptation method: $method"))
     end
     layers = []
     for (index, layer) in enumerate(network(pretrained_model).layers)
@@ -569,10 +575,10 @@ function configure_adaptation(pretrained_model, method; seed, ranks=nothing)
 end
 
 """
-Load a model from a BSON checkpoint.
+Load a model from BSON.
 
 Args:
-    filepath: BSON filepath containing model_cpu.
+    filepath: BSON filepath containing the model_cpu entry.
 
 Returns:
     Saved model.
@@ -587,7 +593,7 @@ Save a CPU copy of a model to BSON.
 
 Args:
     filepath: Output filepath in an existing directory.
-    model: Model to save.
+    model: Model to save. Model will be named model_cpu
 
 Returns:
     Destination filepath.
@@ -597,3 +603,14 @@ function save_model(filepath, model)
     BSON.@save filepath model_cpu
     return filepath
 end
+
+"""
+Count scalar trainable parameters.
+
+Args:
+    model: Model whose trainable arrays are counted.
+
+Returns:
+    Total number of scalar entries in Flux.trainables(model).
+"""
+trainable_parameter_count(model) = sum(length, Flux.trainables(model))
